@@ -48,7 +48,6 @@ namespace Signum.Web.Selenium
         {
             get
             {
-                
                 IWebElement element =  Selenium.TryFindElement(By.Id(Prefix));
                 if (element != null && element.TagName == "input" && element.GetAttribute("type") == "checkbox")
                     return element.Selected.ToString();
@@ -95,7 +94,10 @@ namespace Signum.Web.Selenium
                 var byName = Selenium.TryFindElement(By.Name(Prefix));
                 if (byName != null)
                 {
-                    byName.SafeSendKeys(value);
+                    if (byName.TagName == "select")
+                        byName.SelectElement().SelectByValue(value);
+                    else
+                        byName.SafeSendKeys(value);
                     return;
                 }
                 else
@@ -125,6 +127,19 @@ namespace Signum.Web.Selenium
             StringValue = value == null ? null :
                     value is IFormattable ? ((IFormattable)value).ToString(format, null) :
                     value.ToString();
+        }
+
+        public IWebElement MainElement()
+        {
+            IWebElement element = Selenium.TryFindElement(By.Id(Prefix));
+            if (element != null)
+                return element;
+
+            var byName = Selenium.TryFindElement(By.Name(Prefix));
+            if (byName != null)
+                return byName;
+
+            throw new NotImplementedException();
         }
     }
 
@@ -382,11 +397,24 @@ namespace Signum.Web.Selenium
 
         public Lite<IEntity> LiteValue
         {
-            get { return RuntimeInfo().ToLite(); }
+            get
+            {
+                var text = Selenium.FindElement(ComboLocator).SelectElement().AllSelectedOptions.SingleOrDefaultEx()?.Text;
+
+                return RuntimeInfo().ToLite(text);
+            }
             set
             {
-                Selenium.FindElement(ComboLocator).SelectElement().SelectByValue(value == null ? null : value.Key());
+                Selenium.FindElement(ComboLocator).SelectElement().SelectByValue(value == null ? "" : value.Key());
             }
+        }
+
+        public List<Lite<Entity>> Options()
+        {
+           return Selenium.FindElement(ComboLocator)
+                .SelectElement().Options
+                .Select(o => Lite.Parse(o.GetAttribute("value"))?.Do(l => l.SetToString(o.Text)))
+                .ToList();
         }
 
         public PopupControl<T> View<T>() where T : ModifiableEntity
@@ -523,7 +551,7 @@ namespace Signum.Web.Selenium
 
         public int ItemsCount()
         {
-            return (int)(long)Selenium.ExecuteScript("return .$('#{0}_sfList option').length".FormatWith(Prefix));
+            return (int)(long)Selenium.ExecuteScript("return $('#{0}_sfList option').length".FormatWith(Prefix));
         }
 
         public override int? NewIndex()
@@ -623,7 +651,12 @@ namespace Signum.Web.Selenium
 
         public virtual int ItemsCount()
         {
-            return (int)(long)Selenium.ExecuteScript("return $('#{0}_sfItemsContainer fieldset').length".FormatWith(ItemsContainerLocator));
+            return (int)(long)Selenium.ExecuteScript("return $('{0} fieldset:not(.hidden)').length".FormatWith(ItemsContainerLocator.CssSelector()));
+        }
+
+        public virtual int HiddenItemsCount()
+        {
+            return (int)(long)Selenium.ExecuteScript("return $('{0} fieldset.hidden').length".FormatWith(ItemsContainerLocator.CssSelector()));
         }
 
         public override int? NewIndex()
@@ -665,6 +698,11 @@ namespace Signum.Web.Selenium
             CreateEmbedded<T>(mlist: true);
 
             return this.Details<T>(index.Value);
+        }
+
+        public LineContainer<T> LastDetails<T>() where T : ModifiableEntity
+        {
+            return this.Details<T>(this.ItemsCount() + this.HiddenItemsCount() - 1);
         }
     }
 
@@ -791,6 +829,29 @@ namespace Signum.Web.Selenium
         }
     }
 
+    public class EntityListCheckBoxProxy : EntityBaseProxy
+    {
+        public EntityListCheckBoxProxy(RemoteWebDriver selenium, string prefix, PropertyRoute route)
+            : base(selenium, prefix, route)
+        {
+        }
+
+        public By CheckBoxLocator(Lite<Entity> lite)
+        {
+            return By.CssSelector("#" + this.Prefix + " input[value^='" + RuntimeInfoProxy.FromLite(lite) + "']");
+        }
+
+        public List<Lite<Entity>> GetDataElements()
+        {
+            return Selenium.FindElements(By.CssSelector("#" + this.Prefix + " input[type=checkbox]")).Select(cb => RuntimeInfoProxy.FromFormValue(cb.GetAttribute("value")).ToLite(cb.GetParent().Text)).ToList();
+        }
+
+        public void SetChecked(Lite<Entity> lite, bool isChecked)
+        {
+            this.Selenium.FindElement(CheckBoxLocator(lite)).SetChecked(isChecked);
+        }
+    }
+
 
     public class FileLineProxy : BaseLineProxy
     {
@@ -801,7 +862,6 @@ namespace Signum.Web.Selenium
 
         public void SetPath(string path)
         {
-            Selenium.WaitElementVisible(By.CssSelector("#{0}_DivNew .sf-file-drop".FormatWith(Prefix)));
             Selenium.FindElement(By.CssSelector("#{0}_sfFile".FormatWith(Prefix))).SendKeys(path);
             //Selenium.FireEvent("{0}_sfFile".FormatWith(Prefix), "change");
             Selenium.Wait(() =>

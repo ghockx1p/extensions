@@ -17,8 +17,6 @@
     {
         ViewBag.Title = ViewBag.Title + " [{0}/{1}]".FormatWith(Model.Instances.Count, totalInstances);
     }
-
-
 }
 
 @Html.ScriptsJs("~/Translation/resources/" + CultureInfo.CurrentCulture.Name + ".js")
@@ -111,7 +109,7 @@ else
                         translations.Insert(0, new SelectListItem { Value = "", Text = "-", Selected = true });
                     }
                     
-                        @Html.DropDownList(elementName, translations);
+                        @Html.SafeDropDownList(elementName, translations);
                         <a href="#" class="edit">@TranslationMessage.Edit.NiceToString()</a>
                 }
                     }

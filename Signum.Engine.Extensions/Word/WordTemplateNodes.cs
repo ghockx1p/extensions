@@ -73,9 +73,9 @@ namespace Signum.Engine.Word
             get { return this.GetType().Name; }
         }
 
-        internal protected abstract void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows);
+        internal protected abstract void RenderNode(WordTemplateParameters p);
 
-        internal protected abstract void RenderTemplate(ScopedDictionary<string, ParsedToken> variables);
+        internal protected abstract void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables);
 
         public override string ToString()
         {
@@ -89,97 +89,46 @@ namespace Signum.Engine.Word
 
     public class TokenNode : BaseNode
     {
-        public readonly ParsedToken Token;
-        public readonly QueryToken EntityToken;
+        public readonly ValueProviderBase ValueProvider;
         public readonly string Format;
-        public readonly PropertyRoute Route;
 
-        internal TokenNode(ParsedToken token, string format, WordTemplateParser parser)
+        internal TokenNode(ValueProviderBase valueProvider, string format)
         {
-            this.Token = token;
+            this.ValueProvider = valueProvider;
             this.Format = format;
-
-            if (token.QueryToken != null && IsTranslateInstanceCanditate(token.QueryToken))
-            {
-                Route = token.QueryToken.GetPropertyRoute();
-                string error = DeterminEntityToken(token.QueryToken, out EntityToken);
-                if (error != null)
-                    parser.AddError(false, error);
-            }
         }
 
         internal TokenNode(TokenNode original) : base(original)
         {
-            this.Token = original.Token;
-            this.EntityToken = original.EntityToken;
+            this.ValueProvider = original.ValueProvider;
             this.Format = original.Format;
-            this.Route = original.Route;
-        }
-
-        static bool IsTranslateInstanceCanditate(QueryToken token)
-        {
-            if (token.Type != typeof(string))
-                return false;
-
-            var pr = token.GetPropertyRoute();
-            if (pr == null)
-                return false;
-
-            if (TranslatedInstanceLogic.RouteType(pr) == null)
-                return false;
-
-            return true;
-        }
-
-        string DeterminEntityToken(QueryToken token, out QueryToken entityToken)
-        {
-            entityToken = token.Follow(a => a.Parent).FirstOrDefault(a => a.Type.IsLite() || a.Type.IsIEntity());
-
-            if (entityToken == null)
-                entityToken = QueryUtils.Parse("Entity", DynamicQueryManager.Current.QueryDescription(token.QueryName), 0);
-
-            if (entityToken.Type.IsAssignableFrom(Route.RootType))
-                return "The entity of {0} ({1}) is not compatible with the property route {2}".FormatWith(token.FullKey(), entityToken.FullKey(), Route.RootType.NiceName());
-
-            return null;
         }
 
         public override void FillTokens(List<QueryToken> tokens)
         {
-            tokens.Add(this.Token.QueryToken);
+            ValueProvider.FillQueryTokens(tokens);
         }
 
-        internal protected override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
+        internal protected override void RenderNode(WordTemplateParameters p)
         {
-            string text;
-            if (EntityToken != null)
-            {
-                var entity = (Lite<Entity>)rows.DistinctSingle(p.Columns[EntityToken]);
-                var fallback = (string)rows.DistinctSingle(p.Columns[Token.QueryToken]);
+            object obj = ValueProvider.GetValue(p);
+            string text = obj is Enum ? ((Enum)obj).NiceToString() :
+                obj is IFormattable ? ((IFormattable)obj).ToString(Format ?? ValueProvider.Format, p.Culture) :
+                obj?.ToString();
 
-                text = entity == null ? null : TranslatedInstanceLogic.TranslatedField(entity, Route, fallback);
-            }
-            else
-            {
-                object obj = rows.DistinctSingle(p.Columns[Token.QueryToken]);
-                text = obj is Enum ? ((Enum)obj).NiceToString() :
-                    obj is IFormattable ? ((IFormattable)obj).ToString(Format ?? Token.QueryToken.Format, p.CultureInfo) :
-                    obj.TryToString();
-            }
-
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(prop => prop.Remove()), new Text(text)));
+            this.ReplaceBy(new Run(this.RunProperties?.Do(prop => prop.Remove()), new Text(text)));
         }
 
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
+        protected internal override void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables)
         {
-            var str = "@" + this.Token.ToString(variables, Format.HasText() ? (":" + Format) : null);
+            var str = "@" + this.ValueProvider.ToString(variables, Format.HasText() ? (":" + TemplateUtils.ScapeColon(Format)) : null);
 
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(prop => prop.Remove()), new Text(str)));
+            this.ReplaceBy(new Run(this.RunProperties?.Do(prop => prop.Remove()), new Text(str)));
         }
 
         public override void WriteTo(System.Xml.XmlWriter xmlWriter)
         {
-            var tempText = new Text(Token.QueryToken.Try(q => q.FullKey()) ?? "Error!");
+            var tempText = new Text(ValueProvider.ToString());
 
             this.AppendChild(tempText);
             base.WriteTo(xmlWriter);
@@ -193,33 +142,33 @@ namespace Signum.Engine.Word
 
         public override void Synchronize(SyncronizationContext sc)
         {
-            sc.SynchronizeToken(Token, "@");
+            ValueProvider.Synchronize(sc, "@");
 
-            Token.Declare(sc.Variables);
+            ValueProvider.Declare(sc.Variables);
         }
     }
 
     public class DeclareNode : BaseNode
     {
-        public readonly ParsedToken Token;
+        public readonly ValueProviderBase ValueProvider;
 
-        internal DeclareNode(ParsedToken token, WordTemplateParser walker)
+        internal DeclareNode(ValueProviderBase valueProvider, Action<bool, string> addError)
         {
-            if (!token.Variable.HasText())
-                walker.AddError(true, "declare[{0}] should end with 'as $someVariable'".FormatWith(token));
+            if (!valueProvider.Variable.HasText())
+                addError(true, "declare{0} should end with 'as $someVariable'".FormatWith(valueProvider.ToString()));
 
-            this.Token = token;
+            this.ValueProvider = valueProvider;
         }
 
         public DeclareNode(DeclareNode original)
             : base(original)
         {
-            this.Token = original.Token;
+            this.ValueProvider = original.ValueProvider;
         }
 
         public override void WriteTo(System.Xml.XmlWriter xmlWriter)
         {
-            var tempText = new Text(Token.QueryToken.Try(q => q.FullKey()) ?? "Error!");
+            var tempText = new Text(ValueProvider.ToString() ?? "Error!");
 
             this.AppendChild(tempText);
             base.WriteTo(xmlWriter);
@@ -235,198 +184,26 @@ namespace Signum.Engine.Word
             return new DeclareNode(this);
         }
 
-        protected internal override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
+        protected internal override void RenderNode(WordTemplateParameters p)
         {
-            this.Remove();
+            if (this.Parent is Paragraph && !this.Parent.ChildElements.Any(a => BlockContainerNode.IsImportant (a) && a != this))
+                this.Parent.Remove();
+            else
+                this.Remove();
         }
 
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
+        protected internal override void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables)
         {
-            string str = "@declare" + Token.ToString(variables, null);
+            string str = "@declare" + ValueProvider.ToString(variables, null);
 
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(prop => prop.Remove()), new Text(str)));
+            this.ReplaceBy(new Run(this.RunProperties?.Do(prop => prop.Remove()), new Text(str)));
 
-            Token.Declare(variables);
-        }
-
-        public override void Synchronize(SyncronizationContext sc)
-        {
-            sc.SynchronizeToken(Token, "@declare");
-
-            Token.Declare(sc.Variables);
-        }
-    }
-
-    public class ModelNode : BaseNode
-    {
-        public bool IsRaw { get; set; }
-
-        string fieldOrPropertyChain;
-        List<MemberInfo> members;
-
-        public const BindingFlags flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-
-        internal ModelNode(string fieldOrPropertyChain, WordTemplateParser walker)
-        {
-            if (walker.SystemWordTemplateType == null)
-            {
-                walker.AddError(false, WordTemplateMessage.ModelShouldBeSetToUseModel0.NiceToString().FormatWith(fieldOrPropertyChain));
-                return;
-            }
-
-            this.fieldOrPropertyChain = fieldOrPropertyChain;
-
-            members = new List<MemberInfo>();
-            var type = walker.SystemWordTemplateType;
-            foreach (var field in fieldOrPropertyChain.Split('.'))
-            {
-                var info = (MemberInfo)type.GetField(field, flags) ??
-                           (MemberInfo)type.GetProperty(field, flags);
-
-                if (info == null)
-                {
-                    walker.AddError(false, WordTemplateMessage.Type0DoesNotHaveAPropertyWithName1.NiceToString().FormatWith(type.Name, field));
-                    members = null;
-                    break;
-                }
-
-                members.Add(info);
-
-                type = info.ReturningType();
-            }
-        }
-
-        public ModelNode(ModelNode original) : base(original)
-        {
-            this.IsRaw = original.IsRaw;
-            this.fieldOrPropertyChain = original.fieldOrPropertyChain;
-            this.members = original.members;
-        }
-
-        public override OpenXmlElement CloneNode(bool deep)
-        {
-            return new ModelNode(this);
-        }
-
-        public override void FillTokens(List<QueryToken> tokens)
-        {
-        }
-
-        protected internal override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
-        {
-            if (p.SystemWordTemplate == null)
-                throw new ArgumentException("There is no system email for the message composition");
-
-            object value = p.SystemWordTemplate;
-            foreach (var m in members)
-            {
-                value = Getter(m, value);
-                if (value == null)
-                    break;
-            }
-
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(param => param.Remove()), new Text(value.ToString())));
-        }
-
-        static object Getter(MemberInfo member, object systemEmail)
-        {
-            var pi = member as PropertyInfo;
-
-            if (pi != null)
-                return pi.GetValue(systemEmail, null);
-
-            return ((FieldInfo)member).GetValue(systemEmail);
-        }
-
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
-        {
-            string str = "@model[{0}]".FormatWith(this.members == null ? fieldOrPropertyChain : members.ToString(a => a.Name, "."));
-
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(prop => prop.Remove()), new Text(str)));
+            ValueProvider.Declare(variables);
         }
 
         public override void Synchronize(SyncronizationContext sc)
         {
-            if (members == null)
-            {
-                members = sc.GetMembers(fieldOrPropertyChain);
-
-                if (members != null)
-                {
-                    sc.HasChanges = true;
-                    fieldOrPropertyChain = members.ToString(a => a.Name, ".");
-                }
-            }
-        }
-    }
-
-    public class GlobalVarContext
-    {
-        public IEntity Entity;
-        public CultureInfo Culture;
-        public ISystemWordTemplate SystemWordTemplate;
-    }
-
-    public class GlobalNode : BaseNode
-    {
-        Func<GlobalVarContext, object> globalFunc;
-        string globalKey;
-        internal GlobalNode(string globalKey, WordTemplateParser walker)
-        {
-            this.globalKey = globalKey;
-            this.globalFunc = WordTemplateParser.GlobalVariables.TryGet(globalKey, null);
-            if (globalFunc == null)
-                walker.AddError(false, "The global key {0} was not found".FormatWith(globalKey));
-        }
-
-        public GlobalNode(GlobalNode original)
-            : base(original)
-        {
-            this.globalFunc = original.globalFunc;
-            this.globalKey = original.globalKey;
-        }
-
-        public override OpenXmlElement CloneNode(bool deep)
-        {
-            return new GlobalNode(this);
-        }
-
-        public override void WriteTo(System.Xml.XmlWriter xmlWriter)
-        {
-            var tempText = new Text(globalKey);
-
-            this.AppendChild(tempText);
-            base.WriteTo(xmlWriter);
-            this.RemoveChild(tempText);
-        }
-
-        public override void FillTokens(List<QueryToken> tokens)
-        {
-        }
-
-        internal protected override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
-        {
-            object text = globalFunc(new GlobalVarContext { Entity = p.Entity, Culture = p.CultureInfo, SystemWordTemplate = p.SystemWordTemplate });
-            
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(prop => prop.Remove()), new Text(text.TryToString())));
-        }
-
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
-        {
-            string str = "@global[{0}]".FormatWith(this.globalKey);
-
-            this.ReplaceBy(new Run(this.RunProperties.TryDo(prop => prop.Remove()), new Text(str)));
-        }
-
-        public override void Synchronize(SyncronizationContext sc)
-        {
-            var key = sc.Replacements.SelectInteractive(globalKey, WordTemplateParser.GlobalVariables.Keys, "EmailTemplate Globals", sc.StringDistance);
-
-            if(key != null && key != globalKey)
-            {
-                globalKey = key;
-                sc.HasChanges = true;
-            }
+            ValueProvider.Synchronize(sc, "@declare");
         }
     }
 
@@ -450,11 +227,11 @@ namespace Signum.Engine.Word
             }
         }
 
-        protected internal override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
+        protected internal override void RenderNode(WordTemplateParameters p)
         {
             foreach (var item in this.Descendants<BaseNode>().ToList())
             {
-                item.RenderNode(p, rows);
+                item.RenderNode(p);
             }
 
             var parent = this.Parent;
@@ -468,7 +245,7 @@ namespace Signum.Engine.Word
             }   
         }
 
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
+        protected internal override void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables)
         {
             foreach (var item in this.Descendants<BaseNode>().ToList())
             {
@@ -507,7 +284,7 @@ namespace Signum.Engine.Word
 
         protected internal abstract void ReplaceBlock();
 
-        protected void NormalizeInterval(ref MatchNodePair first, ref MatchNodePair last)
+        protected void NormalizeInterval(ref MatchNodePair first, ref MatchNodePair last, MatchNode errorHintParent)
         {
             if (first.MatchNode == last.MatchNode)
                 throw new ArgumentException("first and last are the same node");
@@ -516,14 +293,14 @@ namespace Signum.Engine.Word
             var chainLast = ((OpenXmlElement)last.MatchNode).Follow(a => a.Parent).Reverse().ToList();
 
             var result = chainFirst.Zip(chainLast, (f, l) => new { f, l }).First(a => a.f != a.l);
-            AssertNotImportant(chainFirst, result.f);
-            AssertNotImportant(chainLast, result.l);
+            AssertNotImportant(chainFirst, result.f, errorHintParent, first.MatchNode, last.MatchNode);
+            AssertNotImportant(chainLast, result.l, errorHintParent, last.MatchNode, first.MatchNode);
 
             first.AscendantNode = result.f;
             last.AscendantNode = result.l;
         }
 
-        private void AssertNotImportant(List<OpenXmlElement> chain, OpenXmlElement openXmlElement)
+        private void AssertNotImportant(List<OpenXmlElement> chain, OpenXmlElement openXmlElement, MatchNode errorHintParent, MatchNode errorHint1, MatchNode errorHint2)
         {
             var index = chain.IndexOf(openXmlElement);
 
@@ -535,13 +312,33 @@ namespace Signum.Engine.Word
                 var important = current.ChildElements.Where(c => c != next && IsImportant(c));
 
                 if (important.Any())
-                    throw new InvalidOperationException("Some important nodes are being removed:\r\n" + important.ToString(a => a.NiceToString(), "\r\n\r\n"));
+                    throw new InvalidOperationException("Node {0} is not at the same level than {1}{2}. Important nodes could be removed close to {0}:\r\n{3}".FormatWith(
+                        errorHint1.Match,
+                        errorHint2.Match,
+                        errorHintParent != errorHint1 && errorHintParent != errorHint2 ? " in " + errorHintParent.Match : "",
+                        current.NiceToString()));
             }
         }
 
-        private bool IsImportant(OpenXmlElement c)
+        public static bool IsImportant(OpenXmlElement c)
         {
-            return c is Run || c is Paragraph;
+            if (c is Paragraph)
+                return true;
+
+            if (c is Run)
+            {
+                var text = c.ChildElements.Where(a => !(a is RunProperties)).Only() as Text;
+
+                if (text != null && string.IsNullOrWhiteSpace(text.Text))
+                    return false;
+
+                return true; 
+            }
+
+            if (c is BaseNode)
+                return true;
+
+            return false;
         }
 
         protected static List<OpenXmlElement> NodesBetween(MatchNodePair first, MatchNodePair last)
@@ -565,30 +362,31 @@ namespace Signum.Engine.Word
 
     public class ForeachNode : BlockContainerNode
     {
-        public readonly ParsedToken Token;
+        public readonly ValueProviderBase ValueProvider;
 
         public MatchNodePair ForeachToken;
         public MatchNodePair EndForeachToken;
 
         public BlockNode ForeachBlock;
 
-        public ForeachNode(ParsedToken token)
+        public ForeachNode(ValueProviderBase valueProvider)
         {
-            this.Token = token;
+            this.ValueProvider = valueProvider;
+            valueProvider.IsForeach = true;
         }
 
         public ForeachNode(ForeachNode original)
             : base(original)
         {
-            this.Token = original.Token;
+            this.ValueProvider = original.ValueProvider;
             this.ForeachToken = original.ForeachToken.CloneNode();
             this.EndForeachToken = original.EndForeachToken.CloneNode();
-            this.ForeachBlock = (BlockNode)original.ForeachBlock.Try(a => a.CloneNode(true));
+            this.ForeachBlock = (BlockNode)original.ForeachBlock?.Let(a => a.CloneNode(true));
         }
 
         public override void FillTokens(List<QueryToken> tokens)
         {
-            tokens.Add(Token.QueryToken);
+            ValueProvider.FillQueryTokens(tokens);
 
             this.ForeachBlock.FillTokens(tokens);
         }
@@ -600,7 +398,7 @@ namespace Signum.Engine.Word
 
         protected internal override void ReplaceBlock()
         {
-            this.NormalizeInterval(ref ForeachToken, ref EndForeachToken);
+            this.NormalizeInterval(ref ForeachToken, ref EndForeachToken, errorHintParent: ForeachToken.MatchNode);
 
             this.ForeachBlock = new BlockNode();
             this.ForeachBlock.MoveChilds(NodesBetween(ForeachToken, EndForeachToken));
@@ -618,45 +416,33 @@ namespace Signum.Engine.Word
             this.RemoveChild(this.ForeachBlock);
         }
 
-        protected internal override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
+        protected internal override void RenderNode(WordTemplateParameters p)
         {
-            var groups = rows.GroupBy(r => r[p.Columns[Token.QueryToken]]).ToList();
-            if (groups.Count == 1 && groups[0].Key == null)
-            {
-                this.Remove();
-                return;
-            }
-
             var parent = this.Parent;
-            int index = parent.ChildElements.IndexOf(this);
-            parent.RemoveChild(this);
-
-
-            List<Tuple<BlockNode, IEnumerable<ResultRow>>> tuples = new List<Tuple<BlockNode, IEnumerable<ResultRow>>>();
-            foreach (IEnumerable<ResultRow> group in groups)
+            
+            this.ValueProvider.Foreach(p, () =>
             {
                 var clone = (BlockNode)this.ForeachBlock.CloneNode(true);
 
-                parent.InsertAt(clone, index++);
+                var index = parent.ChildElements.IndexOf(this);
+                
+                parent.InsertAt(clone, index);
 
-                tuples.Add(Tuple.Create(clone, group));
-            }
+                clone.RenderNode(p);
+            });
 
-            foreach (var tuple in tuples)
-            {
-                tuple.Item1.RenderNode(p, tuple.Item2);
-            }
+            parent.RemoveChild(this);
         }
 
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
+        protected internal override void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables)
         {
             var parent = this.Parent;
             int index = parent.ChildElements.IndexOf(this);
             this.Remove();
-            parent.InsertAt(this.ForeachToken.ReplaceMatchNode("@foreach" + this.Token.ToString(variables, null)), index++);
+            parent.InsertAt(this.ForeachToken.ReplaceMatchNode("@foreach" + this.ValueProvider.ToString(variables, null)), index++);
             {
-                var newVars = new ScopedDictionary<string, ParsedToken>(variables);
-                Token.Declare(newVars);
+                var newVars = new ScopedDictionary<string, ValueProviderBase>(variables);
+                ValueProvider.Declare(newVars);
                 this.ForeachBlock.RenderTemplate(newVars);
                 parent.MoveChildsAt(ref index, this.ForeachBlock.ChildElements);
             }
@@ -666,11 +452,11 @@ namespace Signum.Engine.Word
 
         public override void Synchronize(SyncronizationContext sc)
         {
-            sc.SynchronizeToken(Token, "@foreach");
+            ValueProvider.Synchronize(sc, "@foreach");
 
             using (sc.NewScope())
             {
-                Token.Declare(sc.Variables);
+                ValueProvider.Declare(sc.Variables);
 
                 this.ForeachBlock.Synchronize(sc);
             }
@@ -706,7 +492,7 @@ namespace Signum.Engine.Word
 
         internal OpenXmlElement ReplaceMatchNode(string text)
         {
-            var run = new Run(this.MatchNode.RunProperties.TryDo(prop => prop.Remove()), new Text(text));
+            var run = new Run(this.MatchNode.RunProperties?.Do(prop => prop.Remove()), new Text(text));
             if (this.MatchNode == AscendantNode)
                 return run;
 
@@ -722,7 +508,7 @@ namespace Signum.Engine.Word
 
     public class AnyNode : BlockContainerNode
     {
-        public readonly ParsedToken Token;
+        public readonly ValueProviderBase ValueProvider;
         public readonly FilterOperation? Operation;
         public string Value;
 
@@ -733,37 +519,24 @@ namespace Signum.Engine.Word
         public BlockNode AnyBlock;
         public BlockNode NotAnyBlock;
 
-        public AnyNode(ParsedToken token, WordTemplateParser parser)
+        public AnyNode(ValueProviderBase valueProvider)
         {
-            if (token.QueryToken != null && token.QueryToken.HasAllOrAny())
-                parser.AddError(false, "Any {0} can not contains Any or All".FormatWith(token.QueryToken));
-
-            this.Token = token;
+            this.ValueProvider = valueProvider;
         }
 
-        internal AnyNode(ParsedToken token, string operation, string value, WordTemplateParser parser)
+        internal AnyNode(ValueProviderBase valueProvider, string operation, string value, Action<bool, string> addError)
         {
-            if (token.QueryToken != null && token.QueryToken.HasAllOrAny())
-                parser.AddError(false, "Any {0} can not contains Any or All");
-
-            this.Token = token;
+            this.ValueProvider = valueProvider;
             this.Operation = FilterValueConverter.ParseOperation(operation);
             this.Value = value;
 
-            if (Token.QueryToken != null)
-            {
-                object rubish;
-                string error = FilterValueConverter.TryParse(Value, Token.QueryToken.Type, out rubish, Operation == FilterOperation.IsIn);
-
-                if (error.HasText())
-                    parser.AddError(false, error);
-            }
+            ValueProvider.ValidateConditionValue(value, Operation, addError);
         }
 
         public AnyNode(AnyNode original)
             : base(original)
         {
-            this.Token = original.Token;
+            this.ValueProvider = original.ValueProvider;
             this.Operation = original.Operation;
             this.Value = original.Value;
 
@@ -771,8 +544,8 @@ namespace Signum.Engine.Word
             this.NotAnyToken = original.NotAnyToken.CloneNode();
             this.EndAnyToken = original.EndAnyToken.CloneNode();
 
-            this.AnyBlock = (BlockNode)original.AnyBlock.Try(a => a.CloneNode(true));
-            this.NotAnyBlock = (BlockNode)original.NotAnyBlock.Try(a => a.CloneNode(true));
+            this.AnyBlock = (BlockNode)original.AnyBlock?.Let(a => a.CloneNode(true));
+            this.NotAnyBlock = (BlockNode)original.NotAnyBlock?.Let(a => a.CloneNode(true));
         }
 
         public override OpenXmlElement CloneNode(bool deep)
@@ -799,7 +572,7 @@ namespace Signum.Engine.Word
         {
             if (this.NotAnyToken.MatchNode == null)
             {
-                this.NormalizeInterval(ref AnyToken, ref EndAnyToken);
+                this.NormalizeInterval(ref AnyToken, ref EndAnyToken, errorHintParent: AnyToken.MatchNode);
 
                 this.AnyBlock = new BlockNode();
                 this.AnyBlock.MoveChilds(NodesBetween(AnyToken, EndAnyToken));
@@ -810,8 +583,8 @@ namespace Signum.Engine.Word
             else
             {
                 var notAnyToken = this.NotAnyToken;
-                this.NormalizeInterval(ref AnyToken, ref notAnyToken);
-                this.NormalizeInterval(ref NotAnyToken, ref EndAnyToken);
+                this.NormalizeInterval(ref AnyToken, ref notAnyToken, errorHintParent: AnyToken.MatchNode);
+                this.NormalizeInterval(ref NotAnyToken, ref EndAnyToken, errorHintParent: AnyToken.MatchNode);
 
                 if (notAnyToken.AscendantNode != NotAnyToken.AscendantNode)
                     throw new InvalidOperationException("Unbalanced tokens");
@@ -830,70 +603,44 @@ namespace Signum.Engine.Word
 
         public override void FillTokens(List<QueryToken> tokens)
         {
-            tokens.Add(Token.QueryToken);
+            this.ValueProvider.FillQueryTokens(tokens);
 
             this.AnyBlock.FillTokens(tokens);
             if (this.NotAnyBlock != null)
                 this.NotAnyBlock.FillTokens(tokens);
         }
 
-        protected internal override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
+        protected internal override void RenderNode(WordTemplateParameters p)
         {
-            var filtered = GetFiltered(p, rows);
+            var filtered = this.ValueProvider.GetFilteredRows(p, Operation, Value);
 
-            if (filtered.Any())
+            using (filtered is IEnumerable<ResultRow> ? p.OverrideRows((IEnumerable<ResultRow>)filtered) : null)
             {
-                this.ReplaceBy(this.AnyBlock);
-                this.AnyBlock.RenderNode(p, filtered);
-            }
-            else if (NotAnyBlock != null)
-            {
-                this.ReplaceBy(this.NotAnyBlock);
-                this.NotAnyBlock.RenderNode(p, filtered);
-            }
-            else
-                this.Parent.RemoveChild(this);
-        }
-
-        private IEnumerable<ResultRow> GetFiltered(WordTemplateParameters p, IEnumerable<ResultRow> rows)
-        {
-            if (Operation == null)
-            {
-                var column = p.Columns[Token.QueryToken];
-
-                var filtered = rows.Where(r => TemplateUtils.ToBool(r[column])).ToList();
-
-                return filtered;
-            }
-            else
-            {
-                object val = FilterValueConverter.Parse(Value, Token.QueryToken.Type, Operation == FilterOperation.IsIn);
-
-                Expression value = Expression.Constant(val, Token.QueryToken.Type);
-
-                ResultColumn col = p.Columns[Token.QueryToken];
-
-                var expression = Signum.Utilities.ExpressionTrees.Linq.Expr((ResultRow rr) => rr[col]);
-
-                Expression newBody = QueryUtils.GetCompareExpression(Operation.Value, Expression.Convert(expression.Body, Token.QueryToken.Type), value, inMemory: true);
-                var lambda = Expression.Lambda<Func<ResultRow, bool>>(newBody, expression.Parameters).Compile();
-
-                var filtered = rows.Where(lambda).ToList();
-
-                return filtered;
+                if (filtered.Any())
+                {
+                    this.ReplaceBy(this.AnyBlock);
+                    this.AnyBlock.RenderNode(p);
+                }
+                else if (NotAnyBlock != null)
+                {
+                    this.ReplaceBy(this.NotAnyBlock);
+                    this.NotAnyBlock.RenderNode(p);
+                }
+                else
+                    this.Parent.RemoveChild(this);
             }
         }
 
         public override void Synchronize(SyncronizationContext sc)
         {
-            sc.SynchronizeToken(Token, "@any");
+            this.ValueProvider.Synchronize(sc, "@any");
 
             if (Operation != null)
-                sc.SynchronizeValue(Token, ref Value, Operation == FilterOperation.IsIn);
+                sc.SynchronizeValue(this.ValueProvider.Type, ref Value, Operation == FilterOperation.IsIn);
 
             using (sc.NewScope())
             {
-                Token.Declare(sc.Variables);
+                this.ValueProvider.Declare(sc.Variables);
 
                 AnyBlock.Synchronize(sc);
             }
@@ -902,25 +649,25 @@ namespace Signum.Engine.Word
             {
                 using (sc.NewScope())
                 {
-                    Token.Declare(sc.Variables);
+                    this.ValueProvider.Declare(sc.Variables);
 
                     NotAnyBlock.Synchronize(sc);
                 }
             }
         }
 
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
+        protected internal override void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables)
         {
             var parent = this.Parent;
             int index = parent.ChildElements.IndexOf(this);
             this.Remove();
 
-            string str = "@any" + this.Token.ToString(variables, Operation == null ? null : FilterValueConverter.ToStringOperation(Operation.Value) + Value);
+            string str = "@any" + this.ValueProvider.ToString(variables, Operation == null ? null : FilterValueConverter.ToStringOperation(Operation.Value) + Value);
 
             parent.InsertAt(this.AnyToken.ReplaceMatchNode(str), index++);
             {
-                var newVars = new ScopedDictionary<string, ParsedToken>(variables);
-                Token.Declare(newVars);
+                var newVars = new ScopedDictionary<string, ValueProviderBase>(variables);
+                ValueProvider.Declare(newVars);
                 this.AnyBlock.RenderTemplate(newVars);
                 parent.MoveChildsAt(ref index, this.AnyBlock.ChildElements);
             }
@@ -929,8 +676,8 @@ namespace Signum.Engine.Word
             {
                 parent.InsertAt(this.NotAnyToken.ReplaceMatchNode("@notany"), index++);
 
-                var newVars = new ScopedDictionary<string, ParsedToken>(variables);
-                Token.Declare(newVars);
+                var newVars = new ScopedDictionary<string, ValueProviderBase>(variables);
+                ValueProvider.Declare(newVars);
                 this.NotAnyBlock.RenderTemplate(newVars);
                 parent.MoveChildsAt(ref index, this.NotAnyBlock.ChildElements);
             }
@@ -941,7 +688,7 @@ namespace Signum.Engine.Word
 
     public class IfNode : BlockContainerNode
     {
-        public readonly ParsedToken Token;
+        public readonly ValueProviderBase ValueProvider;
 
         private FilterOperation? Operation;
         private string Value;
@@ -952,32 +699,25 @@ namespace Signum.Engine.Word
 
         public BlockNode IfBlock;
         public BlockNode ElseBlock;
-        
-        internal IfNode(ParsedToken token, WordTemplateParser parser)
+
+        internal IfNode(ValueProviderBase valueProvider)
         {
-            this.Token = token;
+            this.ValueProvider = valueProvider;
         }
 
-        internal IfNode(ParsedToken token, string operation, string value, WordTemplateParser walker)
+        internal IfNode(ValueProviderBase valueProvider, string operation, string value, Action<bool, string> addError)
         {
-            this.Token = token;
+            this.ValueProvider = valueProvider;
             this.Operation = FilterValueConverter.ParseOperation(operation);
             this.Value = value;
 
-            if (Token.QueryToken != null)
-            {
-                object rubish;
-                string error = FilterValueConverter.TryParse(Value, Token.QueryToken.Type, out rubish, Operation == FilterOperation.IsIn);
-
-                if (error.HasText())
-                    walker.AddError(false, error);
-            }
+            ValueProvider.ValidateConditionValue(value, Operation, addError);
         }
 
         public IfNode(IfNode original)
             : base(original)
         {
-            this.Token = original.Token;
+            this.ValueProvider = original.ValueProvider;
             this.Operation = original.Operation;
             this.Value = original.Value;
 
@@ -985,8 +725,8 @@ namespace Signum.Engine.Word
             this.ElseToken = original.ElseToken.CloneNode();
             this.EndIfToken = original.EndIfToken.CloneNode();
 
-            this.IfBlock = (BlockNode)original.IfBlock.Try(a => a.CloneNode(true));
-            this.ElseBlock = (BlockNode)original.ElseBlock.Try(a => a.CloneNode(true));
+            this.IfBlock = (BlockNode)original.IfBlock?.Let(a => a.CloneNode(true));
+            this.ElseBlock = (BlockNode)original.ElseBlock?.Let(a => a.CloneNode(true));
         }
 
         public override OpenXmlElement CloneNode(bool deep)
@@ -998,7 +738,7 @@ namespace Signum.Engine.Word
         {
             if (this.ElseToken.MatchNode == null)
             {
-                this.NormalizeInterval(ref IfToken, ref EndIfToken);
+                this.NormalizeInterval(ref IfToken, ref EndIfToken, errorHintParent: IfToken.MatchNode);
 
                 this.IfBlock = new BlockNode();
                 this.IfBlock.MoveChilds(NodesBetween(IfToken, EndIfToken));
@@ -1009,8 +749,8 @@ namespace Signum.Engine.Word
             else
             {
                 var elseToken = ElseToken;
-                this.NormalizeInterval(ref IfToken, ref elseToken);
-                this.NormalizeInterval(ref ElseToken, ref EndIfToken);
+                this.NormalizeInterval(ref IfToken, ref elseToken, errorHintParent: IfToken.MatchNode);
+                this.NormalizeInterval(ref ElseToken, ref EndIfToken, errorHintParent: IfToken.MatchNode);
 
                 if (elseToken.AscendantNode != ElseToken.AscendantNode)
                     throw new InvalidOperationException("Unbalanced tokens");
@@ -1044,57 +784,39 @@ namespace Signum.Engine.Word
 
         public override void FillTokens(List<QueryToken> tokens)
         {
-            tokens.Add(Token.QueryToken);
+            this.ValueProvider.FillQueryTokens(tokens);
 
             this.IfBlock.FillTokens(tokens);
             if (this.ElseBlock != null)
                 this.ElseBlock.FillTokens(tokens);
         }
 
-        protected internal override void RenderNode(WordTemplateParameters p, IEnumerable<ResultRow> rows)
+        protected internal override void RenderNode(WordTemplateParameters p)
         {
-            if (GetCondition(p, rows))
+            if (this.ValueProvider.GetCondition(p, Operation, Value))
             {
                 this.ReplaceBy(this.IfBlock);
-                this.IfBlock.RenderNode(p, rows);
+                this.IfBlock.RenderNode(p);
             }
             else if (ElseBlock != null)
             {
                 this.ReplaceBy(this.ElseBlock);
-                this.ElseBlock.RenderNode(p, rows);
+                this.ElseBlock.RenderNode(p);
             }
             else
                 this.Parent.RemoveChild(this);
         }
 
-
-        public bool GetCondition(WordTemplateParameters p, IEnumerable<ResultRow> rows)
-        {
-            if (this.Operation == null)
-                return !rows.IsEmpty() && TemplateUtils.ToBool(rows.DistinctSingle(p.Columns[Token.QueryToken]));
-            else
-            {
-                Expression token = Expression.Constant(rows.DistinctSingle(p.Columns[Token.QueryToken]), Token.QueryToken.Type);
-
-                Expression value = Expression.Constant(FilterValueConverter.Parse(Value, Token.QueryToken.Type, Operation == FilterOperation.IsIn), Token.QueryToken.Type);
-
-                Expression newBody = QueryUtils.GetCompareExpression(Operation.Value, token, value, inMemory: true);
-                var lambda = Expression.Lambda<Func<bool>>(newBody).Compile();
-
-                return lambda();
-            }
-        }
-
         public override void Synchronize(SyncronizationContext sc)
         {
-            sc.SynchronizeToken(Token, "@if");
+            this.ValueProvider.Synchronize(sc, "@if");
 
             if (Operation != null)
-                sc.SynchronizeValue(Token, ref Value, Operation == FilterOperation.IsIn);
+                sc.SynchronizeValue(this.ValueProvider.Type, ref Value, Operation == FilterOperation.IsIn);
 
             using (sc.NewScope())
             {
-                Token.Declare(sc.Variables);
+                this.ValueProvider.Declare(sc.Variables);
 
                 IfBlock.Synchronize(sc);
             }
@@ -1103,25 +825,25 @@ namespace Signum.Engine.Word
             {
                 using (sc.NewScope())
                 {
-                    Token.Declare(sc.Variables);
+                    this.ValueProvider.Declare(sc.Variables);
 
                     ElseBlock.Synchronize(sc);
                 }
             }
         }
 
-        protected internal override void RenderTemplate(ScopedDictionary<string, ParsedToken> variables)
+        protected internal override void RenderTemplate(ScopedDictionary<string, ValueProviderBase> variables)
         {
             var parent = this.Parent;
             int index = parent.ChildElements.IndexOf(this);
             this.Remove();
 
-            var str = "@if" + this.Token.ToString(variables, Operation == null ? null : FilterValueConverter.ToStringOperation(Operation.Value) + Value);
+            var str = "@if" + this.ValueProvider.ToString(variables, Operation == null ? null : FilterValueConverter.ToStringOperation(Operation.Value) + Value);
 
             parent.InsertAt(this.IfToken.ReplaceMatchNode(str), index++);
             {
-                var newVars = new ScopedDictionary<string, ParsedToken>(variables);
-                Token.Declare(newVars);
+                var newVars = new ScopedDictionary<string, ValueProviderBase>(variables);
+                this.ValueProvider.Declare(newVars);
                 this.IfBlock.RenderTemplate(newVars);
                 parent.MoveChildsAt(ref index, this.IfBlock.ChildElements);
             }
@@ -1130,8 +852,8 @@ namespace Signum.Engine.Word
             {
                 parent.InsertAt(this.ElseToken.ReplaceMatchNode("@else"), index++);
 
-                var newVars = new ScopedDictionary<string, ParsedToken>(variables);
-                Token.Declare(newVars);
+                var newVars = new ScopedDictionary<string, ValueProviderBase>(variables);
+                this.ValueProvider.Declare(newVars);
                 this.ElseBlock.RenderTemplate(newVars);
                 parent.MoveChildsAt(ref index, this.ElseBlock.ChildElements);
             }

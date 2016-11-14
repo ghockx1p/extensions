@@ -218,15 +218,9 @@ namespace Signum.Engine.Authorization
                     throw new ApplicationException(AuthMessage.Username0IsNotValid.NiceToString().FormatWith(username));
             }
 
-            return UserSession(user);
+            return UserHolder.UserSession(user);
         }
 
-        public static IDisposable UserSession(UserEntity user)
-        {
-            var result = ScopeSessionFactory.OverrideSession();
-            UserEntity.Current = user;
-            return result;
-        }
 
         public static UserEntity RetrieveUser(string username)
         {
@@ -351,6 +345,11 @@ namespace Signum.Engine.Authorization
             return roles.Value.IndirectlyRelatedTo(RoleEntity.Current.ToLite(), true);
         }
 
+        public static HashSet<Lite<RoleEntity>> RolesFromRole(Lite<RoleEntity> role)
+        {
+            return roles.Value.IndirectlyRelatedTo(role, true);
+        }
+
         internal static int Rank(Lite<RoleEntity> role)
         {
             return roles.Value.IndirectlyRelatedTo(role).Count;
@@ -376,9 +375,9 @@ namespace Signum.Engine.Authorization
                      ExportToXml.GetInvocationListTyped().Select(a => a(exportAll)).NotNull().OrderBy(a => a.Name.ToString())));
         }
 
-        public static SqlPreCommand ImportRulesScript(XDocument doc)
+        public static SqlPreCommand ImportRulesScript(XDocument doc, bool interactive)
         {
-           Replacements replacements = new Replacements();
+            Replacements replacements = new Replacements { Interactive = interactive };
 
             Dictionary<string, Lite<RoleEntity>> rolesDic = roles.Value.ToDictionary(a => a.ToString());
             Dictionary<string, XElement> rolesXml = doc.Root.Element("Roles").Elements("Role").ToDictionary(x => x.Attribute("Name").Value);
@@ -398,7 +397,7 @@ namespace Signum.Engine.Authorization
                     var r = rolesDic[kvp.Key];
 
                     var current = GetMergeStrategy(r);
-                    var should = kvp.Value.Attribute("MergeStrategy").Try(t => t.Value.ToEnum<MergeStrategy>()) ?? MergeStrategy.Union;
+                    var should = kvp.Value.Attribute("MergeStrategy")?.Let(t => t.Value.ToEnum<MergeStrategy>()) ?? MergeStrategy.Union;
 
                     if (current != should)
                         throw new InvalidOperationException("Merge strategy of {0} is {1} in the database but is {2} in the file".FormatWith(r, current, should));
@@ -471,8 +470,8 @@ namespace Signum.Engine.Authorization
             var roleInfos = doc.Root.Element("Roles").Elements("Role").Select(x => new
             {
                 Name = x.Attribute("Name").Value,
-                MergeStrategy = x.Attribute("MergeStrategy").Try(ms => ms.Value.ToEnum<MergeStrategy>()) ?? MergeStrategy.Union,
-                SubRoles = x.Attribute("Contains").Value.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                MergeStrategy = x.Attribute("MergeStrategy")?.Let(ms => ms.Value.ToEnum<MergeStrategy>()) ?? MergeStrategy.Union,
+                SubRoles = x.Attribute("Contains").Value.SplitNoEmpty(',' )
             }).ToList();
 
             var roles = roleInfos.ToDictionary(a => a.Name, a => new RoleEntity { Name = a.Name, MergeStrategy = a.MergeStrategy });
@@ -511,7 +510,7 @@ namespace Signum.Engine.Authorization
                     {
                         var oldName = role.Name;
                         role.Name = name;
-                        role.MergeStrategy = xElement.Attribute("MergeStrategy").Try(t => t.Value.ToEnum<MergeStrategy>()) ?? MergeStrategy.Union;
+                        role.MergeStrategy = xElement.Attribute("MergeStrategy")?.Let(t => t.Value.ToEnum<MergeStrategy>()) ?? MergeStrategy.Union;
                         return table.UpdateSqlSync(role, includeCollections: false, comment: oldName);
                     }, Spacing.Double);
 
@@ -570,6 +569,30 @@ namespace Signum.Engine.Authorization
             }
         }
 
+        public static void AutomaticImportAuthRules()
+        {
+            AutomaticImportAuthRules("AuthRules.xml");
+        }
+
+        public static void AutomaticImportAuthRules(string fileName)
+        {
+            Schema.Current.Initialize();
+            var script = AuthLogic.ImportRulesScript(XDocument.Load(fileName), interactive: false);
+            if (script == null)
+            {
+                SafeConsole.WriteColor(ConsoleColor.Green, "AuthRules already synchronized");
+                return;
+            }
+
+            using (var tr = new Transaction())
+            {
+                SafeConsole.WriteColor(ConsoleColor.Yellow, "Executing AuthRules changes...");
+                SafeConsole.WriteColor(ConsoleColor.DarkYellow, script.PlainSql());
+
+                script.PlainSqlCommand().ExecuteLeaves();
+                tr.Commit();
+            }
+        }
 
         public static void ImportExportAuthRules()
         {
@@ -578,23 +601,12 @@ namespace Signum.Engine.Authorization
 
         public static void ImportExportAuthRules(string fileName)
         {
-            Console.WriteLine("You want to export (e), import (i) or sync roles (r) uthRules? (nothing to exit)".FormatWith(fileName));
+            Console.WriteLine("You want to import (i), export (e) or sync roles (r) uthRules? (nothing to exit)".FormatWith(fileName));
 
             string answer = Console.ReadLine();
 
             switch (answer.ToLower())
             {
-                case "e":
-                    {
-                        var doc = ExportRules();
-                        doc.Save(fileName);
-                        Console.WriteLine("Sucesfully exported to {0}".FormatWith(fileName));
-
-                        if (SafeConsole.Ask("Publish to Load?"))
-                            File.Copy(fileName, "../../" + Path.GetFileName(fileName), overwrite: true);
-
-                        break;
-                    }
                 case "i":
                     {
                         Console.Write("Reading {0}...".FormatWith(fileName));
@@ -605,7 +617,7 @@ namespace Signum.Engine.Authorization
                         SqlPreCommand command;
                         try
                         {
-                             command = ImportRulesScript(doc);
+                            command = ImportRulesScript(doc, interactive: true);
                         }
                         catch (InvalidRoleGraphException ex)
                         {
@@ -621,6 +633,17 @@ namespace Signum.Engine.Authorization
                             SafeConsole.WriteLineColor(ConsoleColor.Green, "Already syncronized");
                         else
                             command.OpenSqlFileRetry();
+
+                        break;
+                    }
+                case "e":
+                    {
+                        var doc = ExportRules();
+                        doc.Save(fileName);
+                        Console.WriteLine("Sucesfully exported to {0}".FormatWith(fileName));
+
+                        if (SafeConsole.Ask("Publish to Load?"))
+                            File.Copy(fileName, "../../" + Path.GetFileName(fileName), overwrite: true);
 
                         break;
                     }

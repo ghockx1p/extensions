@@ -6,62 +6,59 @@ using Signum.Entities.Authorization;
 using System.Linq.Expressions;
 using Signum.Utilities;
 using System.ComponentModel;
+using Signum.Utilities.DataStructures;
+using Signum.Utilities.ExpressionTrees;
 
 namespace Signum.Entities.Disconnected
 {
     [Serializable, EntityKind(EntityKind.Main, EntityData.Master)]
     public class DisconnectedMachineEntity : Entity
     {
-        DateTime creationDate = TimeZoneManager.Now;
-        public DateTime CreationDate
-        {
-            get { return creationDate; }
-            private set { Set(ref creationDate, value); }
-        }
+        public DateTime CreationDate { get; private set; } = TimeZoneManager.Now;
 
         [NotNullable, SqlDbType(Size = 100), UniqueIndex]
-        string machineName;
         [StringLengthValidator(AllowNulls = false, Min = 1, Max = 100)]
-        public string MachineName
+        public string MachineName { get; set; }
+
+        public DisconnectedMachineState State { get; set; }
+
+        [NumberIsValidator(ComparisonType.GreaterThan, 0)]
+        public int SeedMin { get; set; }
+
+        [NumberIsValidator(ComparisonType.GreaterThan, 0)]
+        public int SeedMax { get; set; }
+
+        static Expression<Func<DisconnectedMachineEntity, Interval<int>>> SeedIntervalExpression =
+            entity => new Interval<int>(entity.SeedMin, entity.SeedMax);
+        [HiddenProperty, ExpressionField]
+        public Interval<int> SeedInterval
         {
-            get { return machineName; }
-            set { Set(ref machineName, value); }
+            get { return SeedIntervalExpression.Evaluate(this); }
         }
 
-        DisconnectedMachineState state;
-        public DisconnectedMachineState State
-        {
-            get { return state; }
-            set { Set(ref state, value); }
-        }
-
-        int seedMin;
-        public int SeedMin
-        {
-            get { return seedMin; }
-            set { Set(ref seedMin, value); }
-        }
-
-        int seedMax;
-        public int SeedMax
-        {
-            get { return seedMax; }
-            set { Set(ref seedMax, value); }
-        }
-
-        static Expression<Func<DisconnectedMachineEntity, string>> ToStringExpression = e => e.machineName;
+        static Expression<Func<DisconnectedMachineEntity, string>> ToStringExpression = e => e.MachineName;
+        [ExpressionField]
         public override string ToString()
         {
             return ToStringExpression.Evaluate(this);
         }
 
-        public static readonly SessionVariable<Lite<DisconnectedMachineEntity>> CurrentVariable = 
+        public static readonly SessionVariable<Lite<DisconnectedMachineEntity>> CurrentVariable =
             Statics.SessionVariable<Lite<DisconnectedMachineEntity>>("disconectedMachine");
         public static Lite<DisconnectedMachineEntity> Current
         {
             get { return CurrentVariable.Value; }
             set { CurrentVariable.Value = value; }
         }
+
+        protected override string PropertyValidation(System.Reflection.PropertyInfo pi)
+        {
+            if (pi.Name == nameof(SeedMax) && SeedMax <= SeedMin)
+                return ValidationMessage._0ShouldBeGreaterThan1.NiceToString(pi, NicePropertyName(() => SeedMin));
+
+            return base.PropertyValidation(pi);
+        }
+
     }
 
     public enum DisconnectedMachineState
@@ -72,11 +69,12 @@ namespace Signum.Entities.Disconnected
         Fixed,
     }
 
+    [AutoInit]
     public static class DisconnectedMachineOperation
     {
-        public static readonly ExecuteSymbol<DisconnectedMachineEntity> Save = OperationSymbol.Execute<DisconnectedMachineEntity>();
-        public static readonly ExecuteSymbol<DisconnectedMachineEntity> UnsafeUnlock = OperationSymbol.Execute<DisconnectedMachineEntity>();
-        public static readonly ConstructSymbol<DisconnectedImportEntity>.From<DisconnectedMachineEntity> FixImport = OperationSymbol.Construct<DisconnectedImportEntity>.From<DisconnectedMachineEntity>();
+        public static ExecuteSymbol<DisconnectedMachineEntity> Save;
+        public static ExecuteSymbol<DisconnectedMachineEntity> UnsafeUnlock;
+        public static ConstructSymbol<DisconnectedImportEntity>.From<DisconnectedMachineEntity> FixImport;
     }
 
     [Serializable]
@@ -84,12 +82,7 @@ namespace Signum.Entities.Disconnected
     {
         DisconnectedCreatedMixin(Entity mainEntity, MixinEntity next) : base(mainEntity, next) { }
 
-        bool disconnectedCreated;
-        public bool DisconnectedCreated
-        {
-            get { return disconnectedCreated; }
-            set { Set(ref disconnectedCreated, value); }
-        }
+        public bool DisconnectedCreated { get; set; }
     }
 
     [Serializable]
@@ -97,19 +90,9 @@ namespace Signum.Entities.Disconnected
     {
         DisconnectedSubsetMixin(Entity mainEntity, MixinEntity next) : base(mainEntity, next) { }
 
-        long? lastOnlineTicks;
-        public long? LastOnlineTicks
-        {
-            get { return lastOnlineTicks; }
-            set { Set(ref lastOnlineTicks, value); }
-        }
+        public long? LastOnlineTicks { get; set; }
 
-        Lite<DisconnectedMachineEntity> disconnectedMachine;
-        public Lite<DisconnectedMachineEntity> DisconnectedMachine
-        {
-            get { return disconnectedMachine; }
-            set { Set(ref disconnectedMachine, value); }
-        }
+        public Lite<DisconnectedMachineEntity> DisconnectedMachine { get; set; }
     }
 
     [Serializable]
@@ -119,7 +102,7 @@ namespace Signum.Entities.Disconnected
         public Upload Upload;
     }
 
-    
+
     public enum Download
     {
         None,
@@ -142,6 +125,8 @@ namespace Signum.Entities.Disconnected
         [Description("The {0} with Id {1} ({2}) is locked by {3}")]
         The0WithId12IsLockedBy3,
         Imports,
-        Exports
+        Exports,
+        [Description("{0} overlaps with {1}")]
+        _0OverlapsWith1
     }
 }

@@ -28,7 +28,8 @@ using Signum.Web.UserAssets;
 using Signum.Web.Basic;
 using Signum.Entities.Processes;
 using Signum.Web.Cultures;
-using Signum.Entities.Mailing;
+using Signum.Entities.Templating;
+using Signum.Web.Templating;
 
 namespace Signum.Web.Word
 {
@@ -46,52 +47,19 @@ namespace Signum.Web.Word
                 Navigator.RegisterArea(typeof(WordClient));
                 Navigator.AddSettings(new List<EntitySettings>
                 {
-                    new EntitySettings<WordTemplateEntity>{ PartialViewName = e => ViewPrefix.FormatWith("WordTemplate")},
-                    new EntitySettings<WordReportLogEntity>{ PartialViewName = e => ViewPrefix.FormatWith("WordReportLog")},
+                    new EntitySettings<WordTemplateEntity>{ PartialViewName = e => ViewPrefix.FormatWith("WordTemplate")},              
+                    new EntitySettings<SystemWordTemplateEntity>{ },
+                    new EntitySettings<WordTransformerSymbol>{ },
+                    new EntitySettings<WordConverterSymbol>{ },
                 });
-
-                OperationClient.AddSetting(new EntityOperationSettings<Entity>(WordReportLogOperation.CreateWordReportFromEntity)
+                OperationClient.AddSetting(new EntityOperationSettings<WordTemplateEntity>(WordTemplateOperation.CreateWordReport)
                 {
-                    IsVisible = ctx => HasTemplates(ctx.Entity.GetType()),
-                    Click = ctx => CreateReportFromEntity(ctx.Options(), ctx.Entity.GetType(), ctx.Url, contextual: false),
-                    Contextual =
-                    {
-                        IsVisible = ctx => HasTemplates(ctx.Entities.Single().EntityType),
-                        Click = ctx => CreateReportFromEntity(ctx.Options(), ctx.Entities.Single().EntityType, ctx.Url, contextual: true),
-                    }
+                    Group = EntityOperationGroup.None,
+                    Click = ctx => Module["createWordReportFromTemplate"](ctx.Options(), JsFunction.Event,
+                        new FindOptions(ctx.Entity.Query.ToQueryName()).ToJS(ctx.Prefix, "New"),
+                        ctx.Url.Action((WordController mc) => mc.CreateWordReport()))
                 });
-
-                OperationClient.AddSetting(new EntityOperationSettings<WordTemplateEntity>(WordReportLogOperation.CreateWordReportFromTemplate)
-                {
-                    Click = ctx => CreateReportFromTemplate(ctx.Options(), ctx.Entity.Query, ctx.Url, contextual: false),
-                    Contextual =
-                    {
-                        Click = ctx => CreateReportFromTemplate(ctx.Options(), ctx.Entities.Single().InDB(a => a.Query), ctx.Url, contextual: true),
-                    }
-                });
-
-                LinksClient.RegisterEntityLinks<Entity>((ident, ctx) => HasTemplates(ident.EntityType) ? new[] { new QuickLinkExplore(typeof(WordReportLogEntity), "Target", ident) } : null);
             }
-        }
-
-        private static JsFunction CreateReportFromTemplate(JsOperationOptions options, QueryEntity query, UrlHelper urlHelper, bool contextual)
-        {
-            return Module["createWordReportFromTemplate"](options, JsFunction.Event,
-                new FindOptions(query.ToQueryName()).ToJS(options.prefix, "selectEntity"),
-               urlHelper.Action((WordController c) => c.CreateWordReportFromTemplate()), contextual);
-        }
-
-        private static JsFunction CreateReportFromEntity(JsOperationOptions options, Type type, UrlHelper urlHelper, bool contextual)
-        {
-            return Module["createWordReportFromEntity"](options, JsFunction.Event,
-                WordTemplateMessage.ChooseAReportTemplate.NiceToString(),
-                WordTemplateLogic.TemplatesByType.Value.GetOrThrow(type.ToTypeEntity()).Select(a => a.ToChooserOption()).ToList(),
-                urlHelper.Action((WordController c) => c.CreateWordReportFromEntity()), contextual);
-        }
-
-        private static bool HasTemplates(Type type)
-        {
-            return WordTemplateLogic.TemplatesByType.Value.ContainsKey(type.ToTypeEntity());
         }
 
         public static QueryTokenBuilderSettings GetQueryTokenBuilderSettings(QueryDescription qd, SubTokensOptions options)
@@ -99,66 +67,9 @@ namespace Signum.Web.Word
             return new QueryTokenBuilderSettings(qd, options)
             {
                 ControllerUrl = RouteHelper.New().Action("NewSubTokensCombo", "Word"),
-                Decorators = WordDecorators,
+                Decorators = TemplatingClient.TemplatingDecorators,
                 RequestExtraJSonData = null,
             };
-        }
-
-        static void WordDecorators(QueryToken qt, HtmlTag option)
-        {
-            string canIf = CanIf(qt);
-            if (canIf.HasText())
-                option.Attr("data-if", canIf);
-
-            string canForeach = CanForeach(qt);
-            if (canForeach.HasText())
-                option.Attr("data-foreach", canForeach);
-
-            string canAny = CanAny(qt);
-            if (canAny.HasText())
-                option.Attr("data-any", canAny);
-        }
-
-        static string CanIf(QueryToken token)
-        {
-            if (token == null)
-                return TemplateTokenMessage.NoColumnSelected.NiceToString();
-
-            if (token.Type != typeof(string) && token.Type != typeof(byte[]) && token.Type.ElementType() != null)
-                return TemplateTokenMessage.YouCannotAddIfBlocksOnCollectionFields.NiceToString();
-
-            if (token.HasAllOrAny())
-                return TemplateTokenMessage.YouCannotAddBlocksWithAllOrAny.NiceToString();
-
-            return null;
-        }
-
-        static string CanForeach(QueryToken token)
-        {
-            if (token == null)
-                return TemplateTokenMessage.NoColumnSelected.NiceToString();
-
-            if (token.Type != typeof(string) && token.Type != typeof(byte[]) && token.Type.ElementType() != null)
-                return TemplateTokenMessage.YouHaveToAddTheElementTokenToUseForeachOnCollectionFields.NiceToString();
-
-            if (token.Key != "Element" || token.Parent == null || token.Parent.Type.ElementType() == null)
-                return TemplateTokenMessage.YouCanOnlyAddForeachBlocksWithCollectionFields.NiceToString();
-
-            if (token.HasAllOrAny())
-                return TemplateTokenMessage.YouCannotAddBlocksWithAllOrAny.NiceToString();
-
-            return null;
-        }
-
-        static string CanAny(QueryToken token)
-        {
-            if (token == null)
-                return TemplateTokenMessage.NoColumnSelected.NiceToString();
-
-            if (token.HasAllOrAny())
-                return TemplateTokenMessage.YouCannotAddBlocksWithAllOrAny.NiceToString();
-
-            return null;
         }
     }
 }

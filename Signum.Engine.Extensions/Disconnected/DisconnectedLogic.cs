@@ -5,6 +5,7 @@ using System.Text;
 using Signum.Engine.Maps;
 using Signum.Entities;
 using Signum.Utilities;
+using Signum.Utilities.DataStructures;
 using System.Linq.Expressions;
 using Signum.Entities.Authorization;
 using Signum.Engine.DynamicQuery;
@@ -17,6 +18,7 @@ using System.IO.Compression;
 using System.Data.SqlClient;
 using Signum.Engine.Operations;
 using Signum.Entities.Basics;
+using Signum.Utilities.ExpressionTrees;
 
 namespace Signum.Engine.Disconnected
 {
@@ -36,6 +38,7 @@ namespace Signum.Engine.Disconnected
 
         static Expression<Func<DisconnectedMachineEntity, IQueryable<DisconnectedImportEntity>>> ImportsExpression =
                 m => Database.Query<DisconnectedImportEntity>().Where(di => di.Machine.RefersTo(m));
+        [ExpressionField]
         public static IQueryable<DisconnectedImportEntity> Imports(this DisconnectedMachineEntity m)
         {
             return ImportsExpression.Evaluate(m);
@@ -43,15 +46,20 @@ namespace Signum.Engine.Disconnected
 
         static Expression<Func<DisconnectedMachineEntity, IQueryable<DisconnectedImportEntity>>> ExportsExpression =
                m => Database.Query<DisconnectedImportEntity>().Where(di => di.Machine.RefersTo(m));
+        [ExpressionField]
         public static IQueryable<DisconnectedImportEntity> Exports(this DisconnectedMachineEntity m)
         {
             return ExportsExpression.Evaluate(m);
         }
 
-        public static void Start(SchemaBuilder sb, DynamicQueryManager dqm)
+        public static long ServerSeed;
+
+        public static void Start(SchemaBuilder sb, DynamicQueryManager dqm, long serverSeed = 1000000000)
         {
             if (sb.NotDefined(MethodInfo.GetCurrentMethod()))
             {
+                ServerSeed = serverSeed;
+
                 sb.Include<DisconnectedMachineEntity>();
                 sb.Include<DisconnectedExportEntity>();
                 sb.Include<DisconnectedImportEntity>();
@@ -93,17 +101,53 @@ namespace Signum.Engine.Disconnected
 
                 dqm.RegisterExpression((DisconnectedMachineEntity dm) => dm.Imports(), ()=>DisconnectedMessage.Imports.NiceToString());
                 dqm.RegisterExpression((DisconnectedMachineEntity dm) => dm.Exports(), ()=>DisconnectedMessage.Exports.NiceToString());
-
-
+                
                 MachineGraph.Register();
 
-
                 sb.Schema.SchemaCompleted += AssertDisconnectedStrategies;
+
+                sb.Schema.Synchronizing += Schema_Synchronizing;
 
                 sb.Schema.EntityEventsGlobal.Saving += new SavingEventHandler<Entity>(EntityEventsGlobal_Saving);
 
                 sb.Schema.Table<TypeEntity>().PreDeleteSqlSync += new Func<Entity, SqlPreCommand>(AuthCache_PreDeleteSqlSync);
+
+                Validator.PropertyValidator((DisconnectedMachineEntity d) => d.SeedMin).StaticPropertyValidation += (dm, pi) => ValidateDisconnectedMachine(dm, pi, isMin: true);
+                Validator.PropertyValidator((DisconnectedMachineEntity d) => d.SeedMax).StaticPropertyValidation += (dm, pi) => ValidateDisconnectedMachine(dm, pi, isMin: false);
             }
+        }
+
+        private static SqlPreCommand Schema_Synchronizing(Replacements arg)
+        {
+            if (DisconnectedLogic.OfflineMode)
+                return null;
+
+            if (!arg.Interactive  && arg.SchemaOnly) // Is ImportManager
+                return null;
+
+            return Schema.Current.Tables.Values
+                .Where(t => GetStrategy(t.Type).Upload != Upload.None)
+                .SelectMany(t => t.TablesMList().Cast<ITable>().PreAnd(t))
+                .Where(t => t.PrimaryKey.Identity)
+                .Where(a => DisconnectedTools.GetNextId(a) < ServerSeed)
+                .Select(a => DisconnectedTools.SetNextIdSync(a, ServerSeed))
+                .Combine(Spacing.Simple);
+        }
+
+        static string ValidateDisconnectedMachine(DisconnectedMachineEntity dm, PropertyInfo pi, bool isMin)
+        {
+            var conflicts = Database.Query<DisconnectedMachineEntity>()
+                .Where(e => e.SeedInterval.Overlaps(dm.SeedInterval) && e != dm)
+                .Select(e => new { e.SeedInterval, Machine = e.ToLite() })
+                .ToList();
+
+            conflicts = conflicts.Where(c => c.SeedInterval.Contains(isMin ? dm.SeedMin : dm.SeedMax) ||
+                dm.SeedInterval.Subset(c.SeedInterval) || c.SeedInterval.Subset(dm.SeedInterval)).ToList();
+
+            if (conflicts.Any())
+                return DisconnectedMessage._0OverlapsWith1.NiceToString(pi.NiceName(), conflicts.CommaAnd(s => "{0} {1}".FormatWith(s.Machine, s.SeedInterval)));
+
+            return null;
         }
 
         class MachineGraph : Graph<DisconnectedMachineEntity, DisconnectedMachineState>
@@ -115,16 +159,19 @@ namespace Signum.Engine.Disconnected
                 new Execute(DisconnectedMachineOperation.Save)
                 {
                     FromStates = { DisconnectedMachineState.Connected },
-                    ToState = DisconnectedMachineState.Connected,
+                    ToStates = { DisconnectedMachineState.Connected },
                     AllowsNew = true,
                     Lite = false,
-                    Execute = (dm, _) => { }
+                    Execute = (dm, _) => 
+                    {
+
+                    }
                 }.Register();
 
                 new Execute(DisconnectedMachineOperation.UnsafeUnlock)
                 {
                     FromStates = { DisconnectedMachineState.Disconnected, DisconnectedMachineState.Faulted, DisconnectedMachineState.Fixed, DisconnectedMachineState.Connected }, //not fully disconnected
-                    ToState = DisconnectedMachineState.Connected,
+                    ToStates = { DisconnectedMachineState.Connected },
                     Execute = (dm, _) =>
                     {
                         ImportManager.UnlockTables(dm.ToLite());
@@ -188,9 +235,38 @@ namespace Signum.Engine.Disconnected
             if (errors.HasText())
                 throw new InvalidOperationException("Ticks is mandatory for this Disconnected strategy. Tables: \r\n" + errors.Indent(4));
 
+            foreach (var item in strategies.Where(kvp => kvp.Value.Upload != Upload.None).Select(a => a.Key))
+            {
+                giRegisterPreUnsafeInsert.GetInvoker(item)();
+            }
+
             ExportManager.Initialize();
             ImportManager.Initialize();
         }
+
+
+        static readonly GenericInvoker<Action> giRegisterPreUnsafeInsert = new GenericInvoker<Action>(() => Register_PreUnsafeInsert<Entity>());
+        static void Register_PreUnsafeInsert<T>() where T : Entity
+        {
+            Schema.Current.EntityEvents<T>().PreUnsafeInsert += (IQueryable query, LambdaExpression constructor, IQueryable<T> entityQuery) =>
+            {
+                if (constructor.Body.Type == typeof(T))
+                {
+                    var newBody = Expression.Call(
+                      miSetMixin.MakeGenericMethod(typeof(T), typeof(DisconnectedCreatedMixin), typeof(bool)),
+                      constructor.Body,
+                      Expression.Quote(disconnectedCreated),
+                      Expression.Constant(DisconnectedLogic.OfflineMode));
+
+                    return Expression.Lambda(newBody, constructor.Parameters);
+                }
+
+                return constructor; //MListTable
+            };
+        }
+
+        static MethodInfo miSetMixin = ReflectionTools.GetMethodInfo((Entity a) => a.SetMixin((DisconnectedCreatedMixin m) => m.DisconnectedCreated, true)).GetGenericMethodDefinition();
+        static Expression<Func<DisconnectedCreatedMixin, bool>> disconnectedCreated = (DisconnectedCreatedMixin m) => m.DisconnectedCreated;
 
         public static DisconnectedStrategy<T> Register<T>(Download download, Upload upload) where T : Entity
         {
@@ -230,12 +306,14 @@ namespace Signum.Engine.Disconnected
 
         public static DisconnectedExportEntity GetDownloadEstimation(Lite<DisconnectedMachineEntity> machine)
         {
-            return Database.Query<DisconnectedExportEntity>().Where(a => a.Total.HasValue).OrderBy(a => a.Machine == machine ? 0 : 1).ThenBy(a => a.Id).LastOrDefault();
+            return Database.Query<DisconnectedExportEntity>().Where(a => a.Total.HasValue)
+                .OrderBy(a => a.Machine == machine ? 0 : 1).ThenBy(a => a.Id).LastOrDefault();
         }
 
         public static DisconnectedImportEntity GetUploadEstimation(Lite<DisconnectedMachineEntity> machine)
         {
-            return Database.Query<DisconnectedImportEntity>().Where(a => a.Total.HasValue).OrderBy(a => a.Machine == machine ? 0 : 1).ThenBy(a => a.Id).LastOrDefault();
+            return Database.Query<DisconnectedImportEntity>().Where(a => a.Total.HasValue)
+                .OrderBy(a => a.Machine == machine ? 0 : 1).ThenBy(a => a.Id).LastOrDefault();
         }
 
         public static Lite<DisconnectedMachineEntity> GetDisconnectedMachine(string machineName)

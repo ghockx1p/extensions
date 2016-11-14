@@ -47,14 +47,12 @@ namespace Signum.Engine.Authorization
                 {
                     Dictionary<Type, Dictionary<string, PropertyRoute>> routesDicCache = new Dictionary<Type, Dictionary<string, PropertyRoute>>();
 
-                    string replacementKey = typeof(OperationSymbol).Name;
-
                     var groups = x.Element("Properties").Elements("Role").SelectMany(r => r.Elements("Property")).Select(p => new PropertyPair(p.Attribute("Resource").Value))
                         .AgGroupToDictionary(a => a.Type, gr => gr.Select(pp => pp.Property).ToHashSet());
 
                     foreach (var item in groups)
                     {
-                        Type type = TypeLogic.NameToType.TryGetC(replacements.Apply(typeof(TypeEntity).Name, item.Key));
+                        Type type = TypeLogic.NameToType.TryGetC(replacements.Apply(TypeAuthCache.typeReplacementKey, item.Key));
 
                         if (type == null)
                             continue;
@@ -64,8 +62,7 @@ namespace Signum.Engine.Authorization
                         replacements.AskForReplacements(
                            item.Value,
                            dic.Keys.ToHashSet(),
-                           type.Name + " Properties");
-
+                           AuthPropertiesReplacementKey(type));
 
                         routesDicCache[type] = dic;
                     }
@@ -76,11 +73,11 @@ namespace Signum.Engine.Authorization
                     {
                         var pp = new PropertyPair(s);
 
-                        Type type = TypeLogic.NameToType.TryGetC(replacements.Apply(typeof(TypeEntity).Name, pp.Type));
+                        Type type = TypeLogic.NameToType.TryGetC(replacements.Apply(TypeAuthCache.typeReplacementKey, pp.Type));
                         if (type == null)
                             return null;
 
-                        PropertyRoute route = routesDicCache[type].TryGetC(replacements.Apply(type.Name + " Properties", pp.Property));
+                        PropertyRoute route = routesDicCache[type].TryGetC(replacements.Apply(AuthPropertiesReplacementKey(type), pp.Property));
 
                         if (route == null)
                             return null;
@@ -97,6 +94,11 @@ namespace Signum.Engine.Authorization
                     }, EnumExtensions.ToEnum<PropertyAllowed>);
                 };
             }
+        }
+
+        private static string AuthPropertiesReplacementKey(Type type)
+        {
+            return "AuthRules:" + type.Name + " Properties";
         }
 
         struct PropertyPair
@@ -159,7 +161,7 @@ namespace Signum.Engine.Authorization
 
             if (route.PropertyRouteType == PropertyRouteType.Root || route.IsToStringProperty())
             {
-                PropertyAllowed paType = TypeAuthLogic.GetAllowed(route.RootType).Max(ExecutionMode.InUserInterface).ToPropertyAllowed();
+                PropertyAllowed paType = TypeAuthLogic.GetAllowed(route.RootType).MaxUI().ToPropertyAllowed();
                 if (paType < requested)
                     return "Type {0} is set to {1} for {2}".FormatWith(route.RootType.NiceName(), paType, RoleEntity.Current);
 

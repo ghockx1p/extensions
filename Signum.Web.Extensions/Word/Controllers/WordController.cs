@@ -14,6 +14,7 @@ using System.Linq;
 using System.Web;
 using System.Web.Mvc;
 using Signum.Web.Operations;
+using System.IO;
 
 namespace Signum.Web.Word
 {
@@ -33,25 +34,18 @@ namespace Signum.Web.Word
         }
 
         [HttpPost]
-        public ActionResult CreateWordReportFromEntity()
+        public FileContentResult CreateWordReport()
         {
-            var template = Lite.Parse<WordTemplateEntity>(Request["keys"]);
+            var entity = Lite.Parse(Request["keys"]).Retrieve();
 
-            var word = this.ExtractEntity<Entity>()
-                .ConstructFrom(WordReportLogOperation.CreateWordReportFromEntity, template);
+            var template = this.ExtractEntity<WordTemplateEntity>();
 
-            return this.DefaultConstructResult(word);
-        }
+            ISystemWordTemplate systemWordReport = template.SystemWordTemplate == null ? null :
+                (ISystemWordTemplate)SystemWordTemplateLogic.GetEntityConstructor(template.SystemWordTemplate.ToType()).Invoke(new[] { entity });
 
-        [HttpPost]
-        public ActionResult CreateWordReportFromTemplate()
-        {
-            var entity = Lite.Parse<Entity>(Request["keys"]);
+            var bytes = template.CreateReport(entity, systemWordReport);
 
-            var word = this.ExtractEntity<WordTemplateEntity>()
-                .ConstructFrom(WordReportLogOperation.CreateWordReportFromTemplate, entity);
-
-            return this.DefaultConstructResult(word);
+            return File(bytes, MimeType.FromFileName(template.FileName), Path.GetFileName(template.FileName));
         }
     }
 }

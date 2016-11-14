@@ -27,12 +27,9 @@ namespace Signum.Engine.Word
 {
     public class WordTemplateParser
     {
-        public static Dictionary<string, Func<GlobalVarContext, object>> GlobalVariables = new Dictionary<string, Func<GlobalVarContext, object>>();
-
-
-        public List<Error> Errors = new List<Error>();
+        public List<TemplateError> Errors = new List<TemplateError>();
         QueryDescription queryDescription;
-        ScopedDictionary<string, ParsedToken> variables = new ScopedDictionary<string, ParsedToken>(null);
+        ScopedDictionary<string, ValueProviderBase> variables = new ScopedDictionary<string, ValueProviderBase>(null);
         public readonly Type SystemWordTemplateType;
         WordprocessingDocument document;
 
@@ -43,80 +40,83 @@ namespace Signum.Engine.Word
             this.document = document;
         }
 
-
-
         public void ParseDocument()
-        {  
-            var paragraphs = document.MainDocumentPart.Document.Descendants<Paragraph>();
-
-            foreach (var par in paragraphs)
+        {
+            foreach (var p in document.RecursivePartsRootElements())
             {
-                string text = par.ChildElements.OfType<Run>().ToString(r => GetText(r), "");
+                var paragraphs = p.Descendants<Paragraph>();
 
-                IEnumerable<Match> matches = TemplateUtils.KeywordsRegex.Matches(text).Cast<Match>().ToList();
-
-                if (matches.Any())
+                foreach (var par in paragraphs)
                 {
-                    List<ElementInfo> infos = GetElementInfos(par.ChildElements);
+                    string text = par.ChildElements.OfType<Run>().ToString(r => GetText(r), "");
 
-                    par.RemoveAllChildren();
+                    var matches = TemplateUtils.KeywordsRegex.Matches(text).Cast<Match>().ToList();
 
-                    var stack = new Stack<ElementInfo>(infos.AsEnumerable().Reverse());
-
-                    foreach (var m in matches)
+                    if (matches.Any())
                     {
-                        var interval = new Interval<int>(m.Index, m.Index + m.Length);
+                        List<ElementInfo> infos = GetElementInfos(par.ChildElements);
 
-                        //  [Before][Start][Ignore][Ignore][End]...[Remaining]
-                        //              [        Match       ]
+                        par.RemoveAllChildren();
 
-                        ElementInfo start = stack.Pop(); //Start
-                        while (start.Interval.Max <= interval.Min) //Before
+                        var stack = new Stack<ElementInfo>(infos.AsEnumerable().Reverse());
+
+                        foreach (var m in matches)
                         {
-                            par.Append(start.Element);
-                            start = stack.Pop();
-                        }
-                        
-                        Run startRun = (Run)start.Element;
+                            var interval = new Interval<int>(m.Index, m.Index + m.Length);
 
-                        if (start.Interval.Min < interval.Min)
-                        {
-                            Run firstRunPart = new Run { RunProperties = startRun.RunProperties.Try(r => (RunProperties)r.CloneNode(true)) };
-                            firstRunPart.AppendChild(new Text { Text = start.Text.Substring(0, m.Index - start.Interval.Min) });
-                            par.Append(firstRunPart);
-                        }
+                            //  [Before][Start][Ignore][Ignore][End]...[Remaining]
+                            //              [        Match       ]
 
-                        par.Append(new MatchNode(m) { RunProperties = startRun.RunProperties.TryDo(r => r.Remove()) });
-
-                        ElementInfo end = start;
-                        while (end.Interval.Max < interval.Max) //Ignore
-                            end = stack.Pop();
-
-                        if (interval.Max < end.Interval.Max) //End
-                        {
-                            Run endRun = (Run)end.Element;
-
-                            var textPart = end.Text.Substring(interval.Max - end.Interval.Min);
-                            Run endRunPart = new Run { RunProperties = endRun.RunProperties.Try(r => (RunProperties)r.CloneNode(true)) };
-                            endRunPart.AppendChild(new Text { Text = textPart });
-
-                            stack.Push(new ElementInfo
+                            ElementInfo start = stack.Pop(); //Start
+                            while (start.Interval.Max <= interval.Min) //Before
                             {
-                                Element = endRunPart,
-                                Text = textPart,
-                                Interval = new Interval<int>(interval.Max, end.Interval.Max)
-                            });
-                        }
-                    }
+                                par.Append(start.Element);
+                                start = stack.Pop();
+                            }
 
-                    while (!stack.IsEmpty()) //Remaining
-                    {
-                        var pop = stack.Pop();
-                        par.Append(pop.Element);
+                            Run startRun = (Run)start.Element;
+
+                            if (start.Interval.Min < interval.Min)
+                            {
+                                Run firstRunPart = new Run { RunProperties = startRun.RunProperties?.Let(r => (RunProperties)r.CloneNode(true)) };
+                                firstRunPart.AppendChild(new Text { Text = start.Text.Substring(0, m.Index - start.Interval.Min), Space = SpaceProcessingModeValues.Preserve });
+                                par.Append(firstRunPart);
+                            }
+
+                            par.Append(new MatchNode(m) { RunProperties = startRun.RunProperties?.Let(r => (RunProperties)r.CloneNode(true)) });
+
+                            ElementInfo end = start;
+                            while (end.Interval.Max < interval.Max) //Ignore
+                                end = stack.Pop();
+
+                            if (interval.Max < end.Interval.Max) //End
+                            {
+                                Run endRun = (Run)end.Element;
+
+                                var textPart = end.Text.Substring(interval.Max - end.Interval.Min);
+                                Run endRunPart = new Run { RunProperties = endRun.RunProperties?.Let(r => (RunProperties)r.CloneNode(true)) };
+                                endRunPart.AppendChild(new Text { Text = textPart, Space = SpaceProcessingModeValues.Preserve });
+
+                                stack.Push(new ElementInfo
+                                {
+                                    Element = endRunPart,
+                                    Text = textPart,
+                                    Interval = new Interval<int>(interval.Max, end.Interval.Max)
+                                });
+                            }
+                        }
+
+                        while (!stack.IsEmpty()) //Remaining
+                        {
+                            var pop = stack.Pop();
+                            par.Append(pop.Element);
+                        }
                     }
                 }
             }
         }
+
+
 
         private static List<ElementInfo> GetElementInfos(IEnumerable<OpenXmlElement> childrens)
         {
@@ -146,158 +146,167 @@ namespace Signum.Engine.Word
 
         private static string GetText(Run r)
         {
-            return r.ChildElements.OfType<Text>().SingleOrDefault().Try(t => t.Text) ?? "";
+            return r.ChildElements.OfType<Text>().SingleOrDefault()?.Text ?? "";
         }
-        
+
         Stack<BlockContainerNode> stack = new Stack<BlockContainerNode>();
 
         public void CreateNodes()
         {
-            var lists = document.MainDocumentPart.Document.Descendants<MatchNode>().ToList();
-            
-            foreach (var matchNode in lists)
+            foreach (var root in document.RecursivePartsRootElements())
             {
-                var m = matchNode.Match;
+                var lists = root.Descendants<MatchNode>().ToList();
 
-                var token = m.Groups["token"].Value;
-                var keyword = m.Groups["keyword"].Value;
-                var dec = m.Groups["dec"].Value;
-
-                switch (keyword)
+                foreach (var matchNode in lists)
                 {
-                    case "":
-                        var tok = TemplateUtils.TokenFormatRegex.Match(token);
-                        if (!tok.Success)
-                            Errors.Add(new Error(true, "{0} has invalid format".FormatWith(token)));
-                        else
-                        {
-                            var t = TryParseToken(tok.Groups["token"].Value, dec, SubTokensOptions.CanElement);
+                    var m = matchNode.Match;
 
-                            var format = tok.Groups["format"].Value;
-
-                            matchNode.Parent.ReplaceChild(new TokenNode(t, format, this)
-                            {
-                                RunProperties = matchNode.RunProperties.TryDo(d => d.Remove())
-                            }, matchNode);
-
-                            DeclareVariable(t);
-                        }
-                        break;
-                    case "declare":
-                        {
-                            var t = TryParseToken(token, dec, SubTokensOptions.CanElement);
-
-                            matchNode.Parent.ReplaceChild(new DeclareNode(t, this), matchNode);
-
-                            DeclareVariable(t);
-                        }
-                        break;
-                    case "model":
-                    case "modelraw":
-                        {
-                            var model = new ModelNode(token, walker: this) { 
-                                IsRaw = keyword == "modelraw",                             
-                                RunProperties = matchNode.RunProperties.TryDo(d => d.Remove())
-                            };
-
-                            matchNode.Parent.ReplaceChild(model, matchNode);
-                        }
-                        break;
-                    case "any":
-                        {
-                            AnyNode any;
-                            ParsedToken t;
-                            var filter = TemplateUtils.TokenOperationValueRegex.Match(token);
-                            if (!filter.Success)
-                            {
-                                t = TryParseToken(token, dec, SubTokensOptions.CanElement | SubTokensOptions.CanAnyAll);
-                                any = new AnyNode(t, this) { AnyToken = new MatchNodePair(matchNode) };
-                            }
+                    var type = m.Groups["type"].Value;
+                    var token = m.Groups["token"].Value;
+                    var keyword = m.Groups["keyword"].Value;
+                    var dec = m.Groups["dec"].Value;
+                    
+                    switch (keyword)
+                    {
+                        case "":
+                            var s = TemplateUtils.SplitToken(token);
+                            if (s == null)
+                                AddError(true, "{0} has invalid format".FormatWith(token));
                             else
                             {
-                                t = TryParseToken(filter.Groups["token"].Value, dec, SubTokensOptions.CanElement | SubTokensOptions.CanAnyAll);
-                                var comparer = filter.Groups["comparer"].Value;
-                                var value = filter.Groups["value"].Value;
-                                any = new AnyNode(t, comparer, value, this) { AnyToken = new MatchNodePair(matchNode) };
+                                var vp = TryParseValueProvider(type, s.Value.Token, dec);
+                                
+                                matchNode.Parent.ReplaceChild(new TokenNode(vp, s.Value.Format)
+                                {
+                                    RunProperties = matchNode.RunProperties?.Do(d => d.Remove()) 
+                                }, matchNode);
+
+                                DeclareVariable(vp);
                             }
-
-                            PushBlock(any);
-
-                            DeclareVariable(t);
                             break;
-                        }
-                    case "notany":
-                        {
-                            var an = PeekBlock<AnyNode>();
-                            an.NotAnyToken = new MatchNodePair(matchNode);
-                            break;
-                        }
-                    case "endany":
-                        {
-                            var an = PopBlock<AnyNode>();
-                            an.EndAnyToken = new MatchNodePair(matchNode);
-
-                            an.ReplaceBlock(); 
-
-                            break;
-                        }
-                    case "if":
-                        {
-                            IfNode ifn;
-                            ParsedToken t;
-                            var filter = TemplateUtils.TokenOperationValueRegex.Match(token);
-                            if (!filter.Success)
+                        case "declare":
                             {
-                                t = TryParseToken(token, dec, SubTokensOptions.CanElement | SubTokensOptions.CanAnyAll);
-                                ifn = new IfNode(t, this) { IfToken = new MatchNodePair(matchNode) };
+                                var vp = TryParseValueProvider(type, token, dec);
+
+                                matchNode.Parent.ReplaceChild(new DeclareNode(vp, this.AddError)
+                                {
+                                    RunProperties = matchNode.RunProperties?.Do(d => d.Remove()) 
+                                }, matchNode);
+
+                                DeclareVariable(vp);
                             }
-                            else
+                            break;
+                        case "any":
                             {
-                                t = TryParseToken(filter.Groups["token"].Value, dec, SubTokensOptions.CanElement | SubTokensOptions.CanAnyAll);
-                                var comparer = filter.Groups["comparer"].Value;
-                                var value = filter.Groups["value"].Value;
-                                ifn = new IfNode(t, comparer, value, this) { IfToken = new MatchNodePair(matchNode) };
+                                AnyNode any;
+                                ValueProviderBase vp;
+                                var filter = TemplateUtils.TokenOperationValueRegex.Match(token);
+                                if (!filter.Success)
+                                {
+                                    vp = TryParseValueProvider(type, token, dec);
+                                    any = new AnyNode(vp) { AnyToken = new MatchNodePair(matchNode) };
+                                }
+                                else
+                                {
+                                    vp = TryParseValueProvider(type, filter.Groups["token"].Value, dec);
+                                    var comparer = filter.Groups["comparer"].Value;
+                                    var value = filter.Groups["value"].Value;
+                                    any = new AnyNode(vp, comparer, value, this.AddError) { AnyToken = new MatchNodePair(matchNode) };
+                                }
+
+                                PushBlock(any);
+
+                                DeclareVariable(vp);
+                                break;
                             }
+                        case "notany":
+                            {
+                                var an = PeekBlock<AnyNode>();
+                                if (an != null)
+                                {
+                                    an.NotAnyToken = new MatchNodePair(matchNode);
+                                }
+                                break;
+                            }
+                        case "endany":
+                            {
+                                var an = PopBlock<AnyNode>();
+                                if (an != null)
+                                {
+                                    an.EndAnyToken = new MatchNodePair(matchNode);
 
-                            PushBlock(ifn);
+                                    an.ReplaceBlock();
+                                }
+                                break;
+                            }
+                        case "if":
+                            {
+                                IfNode ifn;
+                                ValueProviderBase vp;
+                                var filter = TemplateUtils.TokenOperationValueRegex.Match(token);
+                                if (!filter.Success)
+                                {
+                                    vp = TryParseValueProvider(type, token, dec);
+                                    ifn = new IfNode(vp) { IfToken = new MatchNodePair(matchNode) };
+                                }
+                                else
+                                {
+                                    vp = TryParseValueProvider(type, filter.Groups["token"].Value, dec);
+                                    var comparer = filter.Groups["comparer"].Value;
+                                    var value = filter.Groups["value"].Value;
+                                    ifn = new IfNode(vp, comparer, value, this.AddError) { IfToken = new MatchNodePair(matchNode) };
+                                }
 
-                            DeclareVariable(t);
+                                PushBlock(ifn);
 
+                                DeclareVariable(vp);
+
+                                break;
+                            }
+                        case "else":
+                            {
+                                var an = PeekBlock<IfNode>();
+                                if (an != null)
+                                {
+                                    an.ElseToken = new MatchNodePair(matchNode);
+                                }
+                                break;
+                            }
+                        case "endif":
+                            {
+                                var ifn = PopBlock<IfNode>();
+                                if (ifn != null)
+                                {
+                                    ifn.EndIfToken = new MatchNodePair(matchNode);
+
+                                    ifn.ReplaceBlock();
+                                }
+                                break;
+                            }
+                        case "foreach":
+                            {
+                                var vp = TryParseValueProvider(type, token, dec);
+                                var fn = new ForeachNode(vp) { ForeachToken = new MatchNodePair(matchNode) };
+                                stack.Push(fn);
+
+                                DeclareVariable(vp);
+                                break;
+                            }
+                        case "endforeach":
+                            {
+                                var fn = PopBlock<ForeachNode>();
+                                if (fn != null)
+                                {
+                                    fn.EndForeachToken = new MatchNodePair(matchNode);
+
+                                    fn.ReplaceBlock();
+                                }
+                                break;
+                            }
+                        default:
+                            AddError(true, "'{0}' is deprecated".FormatWith(keyword));
                             break;
-                        }
-                    case "else":
-                        {
-                            var an = PeekBlock<IfNode>();
-                            an.ElseToken = new MatchNodePair(matchNode);
-
-                            break;
-                        }
-                    case "endif":
-                        {
-                            var ifn = PopBlock<IfNode>();
-                            ifn.EndIfToken = new MatchNodePair(matchNode);
-
-                            ifn.ReplaceBlock();
-
-                            break;
-                        }
-                    case "foreach":
-                        {
-                            var t = TryParseToken(token, dec, SubTokensOptions.CanElement);
-                            var fn = new ForeachNode(t) { ForeachToken = new MatchNodePair(matchNode) };
-                            stack.Push(fn);
-                            
-                            DeclareVariable(t);
-                            break;
-                        }
-                    case "endforeach":
-                        {
-                            var fn = PopBlock<ForeachNode>();
-                            fn.EndForeachToken = new MatchNodePair(matchNode);
-
-                            fn.ReplaceBlock();
-                            break;
-                        }
+                    }
                 }
             }
         }
@@ -305,7 +314,7 @@ namespace Signum.Engine.Word
         void PushBlock(BlockContainerNode node)
         {
             stack.Push(node);
-            variables = new ScopedDictionary<string, ParsedToken>(variables);
+            variables = new ScopedDictionary<string, ValueProviderBase>(variables);
         }
 
         T PopBlock<T>() where T : BlockContainerNode
@@ -319,7 +328,7 @@ namespace Signum.Engine.Word
             BlockContainerNode n = stack.Pop();
             if (n == null || !(n is T))
             {
-                AddError(true, "Unexpected '{0}'".FormatWith(BlockContainerNode.UserString(n.Try(p => p.GetType()))));
+                AddError(true, "Unexpected '{0}'".FormatWith(BlockContainerNode.UserString(n?.GetType())));
                 return null;
             }
 
@@ -338,41 +347,37 @@ namespace Signum.Engine.Word
             BlockContainerNode n = stack.Peek();
             if (n == null || !(n is T))
             {
-                AddError(true, "Unexpected '{0}'".FormatWith(BlockContainerNode.UserString(n.Try(p => p.GetType()))));
+                AddError(true, "Unexpected '{0}'".FormatWith(BlockContainerNode.UserString(n?.GetType())));
                 return null;
             }
 
 
             variables = variables.Previous;
-            variables = new ScopedDictionary<string, ParsedToken>(variables);
+            variables = new ScopedDictionary<string, ValueProviderBase>(variables);
             return (T)n;
         }
 
-        private ParsedToken TryParseToken(string tokenString, string variable, SubTokensOptions subTokensOptions)
+        public ValueProviderBase TryParseValueProvider(string type, string token, string variable)
         {
-            string error;
-            var result = ParsedToken.TryParseToken(tokenString, variable, subTokensOptions, this.queryDescription, this.variables, out error);
-            if (error != null)
-                this.Errors.Add(new Error(true, error));
-            return result; 
+            return ValueProviderBase.TryParse(type, token, variable, this.SystemWordTemplateType, this.queryDescription, this.variables, this.AddError);
         }
 
 
         internal void AddError(bool fatal, string message)
         {
-            this.Errors.Add(new Error { IsFatal = fatal, Message = message });
+            this.Errors.Add(new TemplateError(fatal, message));
         }
 
 
-        void DeclareVariable(ParsedToken token)
+        void DeclareVariable(ValueProviderBase token)
         {
             if (token.Variable.HasText())
             {
-                ParsedToken t;
-                if(variables.TryGetValue(token.Variable, out t))
+                ValueProviderBase t;
+                if (variables.TryGetValue(token.Variable, out t))
                 {
-                    if(!t.QueryToken.Equals(token.QueryToken))
-                        this.Errors.Add(new Error(true, "There's already a variable '{0}' defined in this scope".FormatWith(token.Variable)));
+                    if (!t.Equals(token))
+                        AddError(true, "There's already a variable '{0}' defined in this scope".FormatWith(token.Variable));
                 }
                 else
                 {
@@ -383,23 +388,13 @@ namespace Signum.Engine.Word
 
         public void AssertClean()
         {
-            var list = this.document.MainDocumentPart.Document.Descendants<MatchNode>().ToList();
+            foreach (var root in this.document.RecursivePartsRootElements())
+            {
+                var list = root.Descendants<MatchNode>().ToList();
 
-            if (list.Any())
-                throw new InvalidOperationException("{0} unexpected MatchNode instances found".FormatWith(list.Count));
+                if (list.Any())
+                    throw new InvalidOperationException("{0} unexpected MatchNode instances found".FormatWith(list.Count));
+            }
         }
-    }
-
-
-    public struct Error
-    {
-        public Error(bool isFatal, string message)
-        {
-            this.Message = message;
-            this.IsFatal = isFatal;
-        }
-
-        public string Message;
-        public bool IsFatal;
     }
 }

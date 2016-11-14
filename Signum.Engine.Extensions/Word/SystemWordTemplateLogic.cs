@@ -15,15 +15,25 @@ using System.Reflection;
 using System.Text;
 using Signum.Engine.Isolation;
 using Signum.Entities.Isolation;
+using Signum.Engine.Templating;
 
 namespace Signum.Engine.Word
 {
-    public class WordTemplateParameters
+    public class WordTemplateParameters : TemplateParameters
     {
-        public CultureInfo CultureInfo;
-        public IEntity Entity;
+        public WordTemplateParameters(IEntity entity, CultureInfo culture, Dictionary<QueryToken, ResultColumn> columns, IEnumerable<ResultRow> rows) : 
+              base(entity, culture, columns, rows)
+        { }
+
         public ISystemWordTemplate SystemWordTemplate;
-        public Dictionary<QueryToken, ResultColumn> Columns;
+
+        public override object GetModel()
+        {
+            if (SystemWordTemplate == null)
+                throw new ArgumentException("There is no SystemWordTemplate set");
+
+            return SystemWordTemplate;
+        }
     }
 
     public interface ISystemWordTemplate
@@ -33,9 +43,14 @@ namespace Signum.Engine.Word
         List<Filter> GetFilters(QueryDescription qd);
     }
 
-    public abstract class SystemWordEmail<T> : ISystemWordTemplate
+    public abstract class SystemWordTemplate<T> : ISystemWordTemplate
        where T : Entity
     {
+        public SystemWordTemplate(T entity)
+        {
+            this.Entity = entity;
+        }
+
         public T Entity { get; set; }
 
         Entity ISystemWordTemplate.UntypedEntity
@@ -71,6 +86,7 @@ namespace Signum.Engine.Word
             {
                 sb.Schema.Generating += Schema_Generating;
                 sb.Schema.Synchronizing += Schema_Synchronizing;
+                sb.Include<SystemWordTemplateEntity>();
 
                 dqm.RegisterQuery(typeof(SystemWordTemplateEntity), () =>
                     (from se in Database.Query<SystemWordTemplateEntity>()
@@ -83,7 +99,7 @@ namespace Signum.Engine.Word
                 
                 new Graph<WordTemplateEntity>.ConstructFrom<SystemWordTemplateEntity>(WordTemplateOperation.CreateWordTemplateFromSystemWordTemplate)
                 {
-                    Construct = (se, _) => CreateDefaultTemplate(se)
+                    Construct = (se, _) => CreateDefaultTemplate(se).Save()
                 }.Register();
 
                 SystemWordTemplateToWordTemplates = sb.GlobalLazy(() => (
@@ -99,8 +115,10 @@ namespace Signum.Engine.Word
                     var dbSystemWordReports = Database.RetrieveAll<SystemWordTemplateEntity>();
                     return EnumerableExtensions.JoinStrict(
                         dbSystemWordReports, systemWordReports.Keys, swr => swr.FullClassName, type => type.FullName,
-                        (swr, type) => KVP.Create(type, swr), "caching EmailTemplates. Consider synchronize").ToDictionary();
+                        (swr, type) => KVP.Create(type, swr), "caching WordTemplates. Consider synchronize").ToDictionary();
                 }, new InvalidateWith(typeof(SystemWordTemplateEntity)));
+
+                sb.Schema.Initializing += () => TypeToSystemWordTemplate.Load();
 
                 SystemWordTemplateToType = sb.GlobalLazy(() => TypeToSystemWordTemplate.Value.Inverse(),
                     new InvalidateWith(typeof(SystemWordTemplateEntity)));
@@ -124,16 +142,49 @@ namespace Signum.Engine.Word
         }
 
 
-        public static WordReportLogEntity CreateTeplate(this ISystemWordTemplate systemWordTemplate)
+        public static byte[] CreateReport(this ISystemWordTemplate systemWordTemplate, bool avoidConversion = false)
         {
-            SystemWordTemplateEntity system = TypeToSystemWordTemplate.Value.GetOrThrow(systemWordTemplate.GetType());
+            WordTemplateEntity rubish;
+            return systemWordTemplate.CreateReport(out rubish, avoidConversion);
+        }
 
-            Lite<WordTemplateEntity> template = (from lite in SystemWordTemplateToWordTemplates.Value.GetOrThrow(system.ToLite())
-                                                 let e = WordTemplateLogic.WordTemplatesLazy.Value.GetOrThrow(lite)
-                                                 where e.IsActiveNow() && systemWordTemplate.UntypedEntity.TryIsolation().Is(e.TryIsolation())
-                                                 select lite).SingleEx();
+        public static byte[] CreateReport(this ISystemWordTemplate systemWordTemplate, out WordTemplateEntity template, bool avoidConversion = false)
+        {
+            SystemWordTemplateEntity system = GetSystemWordTemplate(systemWordTemplate.GetType());
 
-            return WordReportLogic.CreateReport(template, systemWordTemplate.UntypedEntity.ToLiteFat(), systemWordTemplate); 
+            template = GetDefaultTemplate(system);
+
+            return WordTemplateLogic.CreateReport(template.ToLite(), systemWordTemplate.UntypedEntity, systemWordTemplate, avoidConversion); 
+        }
+
+        public static SystemWordTemplateEntity GetSystemWordTemplate(Type type)
+        {
+            return TypeToSystemWordTemplate.Value.GetOrThrow(type);
+        }
+
+        public static WordTemplateEntity GetDefaultTemplate(SystemWordTemplateEntity systemWordTemplate)
+        {
+            var isAllowed = Schema.Current.GetInMemoryFilter<WordTemplateEntity>(userInterface: false);
+
+            var templates = SystemWordTemplateToWordTemplates.Value.TryGetC(systemWordTemplate.ToLite()).EmptyIfNull().Select(a => WordTemplateLogic.WordTemplatesLazy.Value.GetOrThrow(a));
+
+            templates = templates.Where(isAllowed);
+
+            if (templates.IsNullOrEmpty())
+            {
+                using (ExecutionMode.Global())
+                using (OperationLogic.AllowSave<WordTemplateEntity>())
+                using (Transaction tr = Transaction.ForceNew())
+                {
+                    var template = CreateDefaultTemplate(systemWordTemplate);
+
+                    template.Save();
+
+                    return tr.Commit(template);
+                }
+            }
+
+            return templates.Where(t => t.IsActiveNow()).SingleEx(() => "Active WordTemplates for SystemWordTemplate {0}".FormatWith(systemWordTemplate));
         }
 
         static SqlPreCommand Schema_Generating()
@@ -197,13 +248,13 @@ namespace Signum.Engine.Word
             systemWordReports[model] = new SystemWordTemplateInfo
             {
                 DefaultTemplateConstructor = defaultTemplateConstructor,
-                QueryName = queryName ?? GetDefaultQueryName(model),
+                QueryName = queryName ?? GetEntityType(model),
             };
         }
 
-        static object GetDefaultQueryName(Type model)
+        static Type GetEntityType(Type model)
         {
-            var baseType = model.Follow(a => a.BaseType).FirstOrDefault(b => b.IsInstantiationOf(typeof(SystemWordEmail<>)));
+            var baseType = model.Follow(a => a.BaseType).FirstOrDefault(b => b.IsInstantiationOf(typeof(SystemWordTemplate<>)));
 
             if (baseType != null)
             {
@@ -219,6 +270,21 @@ namespace Signum.Engine.Word
                 return null;
 
             return SystemWordTemplateToType.Value.GetOrThrow(systemWordTemplate);
+        }
+
+        public static bool RequiresExtraParameters(SystemWordTemplateEntity systemWordTemplateEntity)
+        {
+            return GetEntityConstructor(systemWordTemplateEntity.ToType()) == null;
+        }
+
+        public static ConstructorInfo GetEntityConstructor(Type systemWordTempalte)
+        {
+            var entityType = GetEntityType(systemWordTempalte);
+
+            return (from ci in systemWordTempalte.GetConstructors()
+                    let pi = ci.GetParameters().Only()
+                    where pi != null && pi.ParameterType == entityType
+                    select ci).SingleOrDefaultEx();
         }
     }
 }

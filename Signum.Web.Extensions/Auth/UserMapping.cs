@@ -1,5 +1,4 @@
-﻿#region usings
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -12,7 +11,6 @@ using Signum.Engine;
 using System.Web.Mvc;
 using Signum.Entities.Authorization;
 using Signum.Services;
-#endregion
 
 namespace Signum.Web.Auth
 {
@@ -27,7 +25,7 @@ namespace Signum.Web.Auth
             .SetProperty(u => u.PasswordHash, ctx =>
             {
                 string oldPassword = ctx.Parent.Inputs[OldPasswordKey];
-                if (ctx.Value != Security.EncodePassword(oldPassword))
+                if (!ctx.Value.EmptyIfNull().SequenceEqual(Security.EncodePassword(oldPassword).EmptyIfNull()))
                     return ctx.ParentNone(OldPasswordKey, AuthMessage.PasswordDoesNotMatchCurrent.NiceToString());
 
                 return GetNewPassword(ctx, NewPasswordKey, NewPasswordBisKey);

@@ -47,7 +47,7 @@ namespace Signum.Engine.Authorization
                     exportAll ? OperationLogic.RegisteredOperations.ToList() : null);
                 AuthLogic.ImportFromXml += (x, roles, replacements) =>
                 {
-                    string replacementKey = typeof(OperationSymbol).Name;
+                    string replacementKey = "AuthRules:" + typeof(OperationSymbol).Name;
 
                     replacements.AskForReplacements(
                         x.Element("Operations").Elements("Role").SelectMany(r => r.Elements("Operation")).Select(p => p.Attribute("Resource").Value).ToHashSet(),
@@ -113,7 +113,7 @@ namespace Signum.Engine.Authorization
             if (GetTemporallyAllowed(operationKey))
                 return true;
 
-            OperationAllowed allowed =cache.GetAllowed(RoleEntity.Current.ToLite(), operationKey);
+            OperationAllowed allowed = cache.GetAllowed(RoleEntity.Current.ToLite(), operationKey);
 
             return allowed == OperationAllowed.Allow || allowed == OperationAllowed.DBOnly && !inUserInterface;
         }

@@ -27,7 +27,7 @@ namespace Signum.Web.Translation.Controllers
         {
             var cultures = TranslationLogic.CurrentCultureInfos(CultureInfo.GetCultureInfo("en"));
 
-            var assemblies = AssembliesToLocalize().ToDictionary(a=>a.FullName);
+            var assemblies = AssembliesToLocalize().ToDictionary(a => a.FullName);
 
             var dg = DirectedGraph<Assembly>.Generate(assemblies.Values, a => a.GetReferencedAssemblies().Select(an => assemblies.TryGetC(an.FullName)).NotNull());
 
@@ -185,7 +185,7 @@ namespace Signum.Web.Translation.Controllers
             var target = reference.Extract(targetCulture); 
             DictionaryByTypeName(target); //To avoid finding duplicated types on save
             int totalTypes;
-            var changes = TranslationSynchronizer.GetAssemblyChanges(TranslationClient.Translator, target, master, reference.Values.ToList(), true, out totalTypes);
+            var changes = TranslationSynchronizer.GetAssemblyChanges(TranslationClient.Translator, target, master, reference.Values.ToList(), false, out totalTypes);
 
             ViewBag.TotalTypes = totalTypes;
             ViewBag.Culture = targetCulture;

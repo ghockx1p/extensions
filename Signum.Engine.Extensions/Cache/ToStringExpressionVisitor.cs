@@ -5,6 +5,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using DocumentFormat.OpenXml.Presentation;
 using Signum.Engine.Maps;
 using Signum.Entities;
 using Signum.Entities.Reflection;
@@ -63,46 +64,18 @@ namespace Signum.Engine.Cache
             var lambda = Expression.Lambda(body, n.Constructor.origin);
 
             ConstantExpression tab = Expression.Constant(n.Constructor.cachedTable, typeof(CachedTable<>).MakeGenericType(((Table)n.Constructor.table).Type));
+            
+            Expression origin = Expression.Convert(Expression.Property(Expression.Property(tab, "Rows"), "Item", n.PrimaryKey.UnNullify()), n.Constructor.tupleType);
+
+            var result = ExpressionReplacer.Replace(body, new Dictionary<ParameterExpression, Expression> { { n.Constructor.origin, origin } });
 
             if (!n.PrimaryKey.Type.IsNullable())
-            {
-                Expression origin = Expression.Convert(Expression.Property(Expression.Property(tab, "Rows"), "Item", n.PrimaryKey), n.Constructor.tupleType);
+                return result;
 
-                return ExpressionReplacer.Replace(body, new Dictionary<ParameterExpression, Expression> { { n.Constructor.origin, origin } });
-            }
-            else
-            {
-                var pk2 = Expression.Parameter(typeof(PrimaryKey), "pk2");
-
-                Expression origin = Expression.Convert(Expression.Property(Expression.Property(tab, "Rows"), "Item", pk2), n.Constructor.tupleType);
-
-                var newBody = ExpressionReplacer.Replace(body, new Dictionary<ParameterExpression, Expression> { { n.Constructor.origin, origin } });
-
-                return TryExpression(n.PrimaryKey, pk2, newBody);
-            }
-        }
-
-        public static readonly MethodInfo miTryCC = ReflectionTools.GetMethodInfo((string s) => s.Try(a => a.ToString())).GetGenericMethodDefinition();
-        public static readonly MethodInfo miTryCS = ReflectionTools.GetMethodInfo((string s) => s.Try(a => a.Length)).GetGenericMethodDefinition();
-        public static readonly MethodInfo miTryCN = ReflectionTools.GetMethodInfo((string s) => s.Try(a => (int?)a.Length)).GetGenericMethodDefinition();
-
-        public static readonly MethodInfo miTrySC = ReflectionTools.GetMethodInfo((int? s) => s.Try(a => a.ToString())).GetGenericMethodDefinition();
-        public static readonly MethodInfo miTrySS = ReflectionTools.GetMethodInfo((int? s) => s.Try(a => a)).GetGenericMethodDefinition();
-        public static readonly MethodInfo miTrySN = ReflectionTools.GetMethodInfo((int? s) => s.Try(a => (int?)a)).GetGenericMethodDefinition();
-
-        public static MethodCallExpression TryExpression(Expression left, ParameterExpression param, Expression body)
-        {
-            MethodInfo mi = left.Type.IsClass ?
-                (body.Type.IsClass ? miTryCC : body.Type.IsValueType ? miTryCS : miTryCN) :
-                (body.Type.IsClass ? miTrySC : body.Type.IsValueType ? miTrySS : miTrySN);
-
-            MethodInfo miConv = mi.MakeGenericMethod(left.Type.UnNullify(), body.Type.UnNullify());
-
-            Type lambdaType = miConv.GetParameters().Last().ParameterType;
-
-            var lambda = Expression.Lambda(lambdaType, body, param);
-
-            return Expression.Call(miConv, left, lambda);
+            return Expression.Condition(
+                Expression.Equal(n.PrimaryKey, Expression.Constant(null, n.PrimaryKey.Type)),
+                Expression.Constant(null, result.Type.Nullify()),
+                result.Nullify());
         }
 
         private Expression GetField(Field field, CachedTableConstructor constructor, Expression previousPrimaryKey)
@@ -117,8 +90,7 @@ namespace Signum.Engine.Cache
                 return Expression.Convert(constructor.GetTupleProperty((IColumn)field), field.FieldType);
 
             if (field is IFieldReference)
-            {
-                var nullRef = Expression.Constant(null, field.FieldType);
+            {   
                 bool isLite = ((IFieldReference)field).IsLite;
 
                 if (field is FieldReference)
@@ -127,13 +99,13 @@ namespace Signum.Engine.Cache
 
                     Expression id = CachedTableConstructor.WrapPrimaryKey(constructor.GetTupleProperty(column));
 
-                    return GetEntity(isLite, column, field.FieldType,  constructor);
+                    return GetEntity(isLite, column, field.FieldType.CleanType(),  constructor);
                 }
 
                 if (field is FieldImplementedBy)
                 {
                     var ib = (FieldImplementedBy)field;
-
+                    var nullRef = Expression.Constant(null, field.FieldType);
                     var call = ib.ImplementationColumns.Aggregate((Expression)nullRef, (acum, kvp) =>
                     {
                         IColumn column = (IColumn)kvp.Value;
@@ -171,18 +143,20 @@ namespace Signum.Engine.Cache
             throw new InvalidOperationException("Unexpected {0}".FormatWith(field.GetType().Name));
         }
 
-        private Expression GetEntity(bool isLite, IColumn column, Type type, CachedTableConstructor constructor)
+        private Expression GetEntity(bool isLite, IColumn column, Type entityType, CachedTableConstructor constructor)
         {
             Expression id = constructor.GetTupleProperty(column);
 
             var pk = CachedTableConstructor.WrapPrimaryKey(id.UnNullify());
 
-            CachedTableConstructor typeConstructor = CacheLogic.GetCacheType(type) == CacheType.Cached ?
-                CacheLogic.GetCachedTable(type).Constructor :
+            CachedTableConstructor typeConstructor = CacheLogic.GetCacheType(entityType) == CacheType.Cached ?
+                CacheLogic.GetCachedTable(entityType).Constructor :
                 constructor.cachedTable.SubTables.SingleEx(a => a.ParentColumn == column).Constructor;
 
-            return new CachedEntityExpression(pk, type, typeConstructor, null);
+            return new CachedEntityExpression(pk, entityType, typeConstructor, null);
         }
+
+        static readonly MethodInfo miToString = ReflectionTools.GetMethodInfo((object o) => o.ToString());
 
         protected override Expression VisitMethodCall(MethodCallExpression node)
         {
@@ -190,7 +164,7 @@ namespace Signum.Engine.Cache
 
             var args = base.Visit(node.Arguments);
 
-            LambdaExpression lambda = ExpressionCleaner.GetFieldExpansion(obj.Try(a => a.Type), CachedTableBase.ToStringMethod);
+            LambdaExpression lambda = ExpressionCleaner.GetFieldExpansion(obj?.Type, CachedTableBase.ToStringMethod);
 
             if (lambda != null)
             {
@@ -213,6 +187,36 @@ namespace Signum.Engine.Cache
         protected override Expression VisitParameter(ParameterExpression node)
         {
             return this.replacements.TryGetC(node) ?? node;
+        }
+
+        protected override Expression VisitBinary(BinaryExpression node)
+        {
+            var result = (BinaryExpression)base.VisitBinary(node);
+            
+            if (result.NodeType == ExpressionType.Equal || result.NodeType == ExpressionType.NotEqual)
+            { 
+                if (result.Left is CachedEntityExpression || result.Right is CachedEntityExpression)
+                {
+                    var left = GetPrimaryKey(result.Left);
+                    var right = GetPrimaryKey(result.Right);
+
+                    return Expression.MakeBinary(node.NodeType, left, right);
+                }
+            }
+
+            return result;
+        }
+
+        private Expression GetPrimaryKey(Expression exp)
+        {
+            if (exp is ConstantExpression && ((ConstantExpression)exp).Value == null)
+                return Expression.Constant(null, typeof(PrimaryKey?));
+
+            var cee = exp as CachedEntityExpression;
+            if (cee != null)
+                return cee.PrimaryKey;
+
+            throw new InvalidOperationException("");
         }
     }
 
@@ -269,6 +273,11 @@ namespace Signum.Engine.Cache
                 return this;
 
             return new CachedEntityExpression(pk, type, Constructor, FieldEmbedded);
+        }
+
+        public override string ToString()
+        {
+            return $"CachedEntityExpression({Type.TypeName()}, {PrimaryKey})";
         }
     }
 }

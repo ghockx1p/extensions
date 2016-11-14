@@ -89,10 +89,15 @@ namespace Signum.Web.Selenium
             return new ValueLineProxy(lineContainer.Selenium, newPrefix, newRoute);
         }
 
-        public static void ValueLineValue<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property, V value)
+        public static void ValueLineValue<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property, V value, bool loseFocus = false)
             where T : ModifiableEntity
         {
-            lineContainer.ValueLine(property).Value = value;
+            var valueLine = lineContainer.ValueLine(property);
+
+            valueLine.Value = value;
+
+            if (loseFocus)
+                lineContainer.Selenium.LoseFocus(valueLine.MainElement());
         }
 
         public static FileLineProxy FileLine<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property)
@@ -130,7 +135,7 @@ namespace Signum.Web.Selenium
         public static void EntityLineValue<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property, V value)
             where T : ModifiableEntity
         {
-            lineContainer.EntityLine(property).LiteValue = value is Lite<IEntity> ? (Lite<IEntity>)value : ((IEntity)value).ToLite();
+            lineContainer.EntityLine(property).LiteValue = value as Lite<IEntity> ?? ((IEntity)value)?.ToLite();
         }
 
         public static EntityComboProxy EntityCombo<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property)
@@ -145,15 +150,20 @@ namespace Signum.Web.Selenium
         public static V EntityComboValue<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property)
         where T : ModifiableEntity
         {
-            var lite = lineContainer.EntityLine(property).LiteValue;
+            var lite = lineContainer.EntityCombo(property).LiteValue;
 
             return lite is V ? (V)lite : (V)(object)lite.Retrieve();
         }
 
-        public static void EntityComboValue<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property, V value)
+        public static void EntityComboValue<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property, V value, bool loseFocus = false)
             where T : ModifiableEntity
         {
-            lineContainer.EntityCombo(property).LiteValue = value is Lite<IEntity> ? (Lite<IEntity>)value : ((IEntity)value).ToLite();
+            var combo = lineContainer.EntityCombo(property);
+
+            combo.LiteValue = value as Lite<IEntity> ?? ((IEntity)value)?.ToLite();
+
+            if (loseFocus)
+                lineContainer.Selenium.LoseFocus(lineContainer.Selenium.FindElement(combo.ComboLocator));
         }
 
         public static EntityDetailProxy EntityDetail<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property)
@@ -210,6 +220,15 @@ namespace Signum.Web.Selenium
             return new EntityListDetailProxy(lineContainer.Selenium, newPrefix, newRoute);
         }
 
+        public static EntityListCheckBoxProxy EntityListCheckBox<T, V>(this ILineContainer<T> lineContainer, Expression<Func<T, V>> property)
+            where T : ModifiableEntity
+        {
+            string newPrefix;
+            PropertyRoute newRoute = lineContainer.GetRoute(property, out newPrefix);
+
+            return new EntityListCheckBoxProxy(lineContainer.Selenium, newPrefix, newRoute);
+        }
+
         public static bool IsImplementation(this PropertyRoute route, Type type)
         {
             if (!typeof(Entity).IsAssignableFrom(type))
@@ -250,7 +269,7 @@ namespace Signum.Web.Selenium
             var result = (string)lineContainer.Selenium
                 .ExecuteScript("return $('#" + lineContainer.PrefixUnderscore() + "sfGlobalValidationSummary > ul > li').toArray().map(function(e){return $(e).text()}).join('\\r\\n');");
 
-            return result.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+            return result.SplitNoEmpty("\r\n" );
         }
 
         public static SearchControlProxy GetSearchControl(this ILineContainer lineContainer, object queryName)

@@ -1,5 +1,4 @@
-﻿#region usings
-using System;
+﻿using System;
 using System.Web;
 using System.Web.Mvc;
 using System.Web.Security;
@@ -19,7 +18,6 @@ using Signum.Engine.Mailing;
 using System.Collections.Generic;
 using Signum.Engine.Operations;
 using Signum.Web.Operations;
-#endregion
 
 namespace Signum.Web.Auth
 {
@@ -205,7 +203,7 @@ namespace Signum.Web.Auth
 
                 ResetPasswordRequestEntity rpr = ResetPasswordRequestLogic.ResetPasswordRequest(user);
                 string url = HttpContext.Request.Url.GetLeftPart(UriPartial.Authority) + Url.Action<AuthController>(ac => ac.ResetPasswordCode(email, rpr.Code));
-                new ResetPasswordRequestMail { Entity = rpr, Url = url }.SendMailAsync();
+                new ResetPasswordRequestMail(rpr, url).SendMailAsync();
             }
 
             TempData["email"] = email;
@@ -318,6 +316,12 @@ namespace Signum.Web.Auth
             if (string.IsNullOrEmpty(password))
                 return LoginError("password", AuthMessage.PasswordMustHaveAValue.NiceToString());
 
+            if(UserEntity.Current != null)
+            {
+                if (UserLoggingOut != null)
+                    UserLoggingOut();
+            }
+
             // Attempt to login
             UserEntity user = null;
             try
@@ -416,8 +420,6 @@ namespace Signum.Web.Auth
 
             if (UserLoggingOut != null)
                 UserLoggingOut();
-
-            FormsAuthentication.SignOut();
 
             UserTicketClient.RemoveCookie();
             

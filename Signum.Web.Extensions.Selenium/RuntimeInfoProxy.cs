@@ -17,6 +17,17 @@ namespace Signum.Web.Selenium
         public string EntityTypeString { get; private set; }
         public long? Ticks { get; private set; }
 
+        public static RuntimeInfoProxy FromLite(Lite<IEntity> lite)
+        {
+            return new RuntimeInfoProxy
+            {
+                EntityType = lite.EntityType,
+                IdOrNull = lite.IdOrNull,
+                IsNew = false,
+                Ticks = null,
+            };
+        }
+
         public static RuntimeInfoProxy FromFormValue(string formValue)
         {
             string[] parts = formValue.Split(new[] { ";" }, StringSplitOptions.None);
@@ -47,13 +58,13 @@ namespace Signum.Web.Selenium
 
             return "{0};{1};{2};{3}".FormatWith(
                 (EntityType == null) ? "" : TypeLogic.GetCleanName(EntityType),
-                IdOrNull.TryToString(),
+                IdOrNull?.ToString(),
                 IsNew ? "n" : "o",
                 Ticks
                 );
         }
 
-        public Lite<Entity> ToLite()
+        public Lite<Entity> ToLite(string toString = null)
         {
             if (IsNew)
                 throw new InvalidOperationException("The RuntimeInfo represents a new entity");
@@ -61,7 +72,7 @@ namespace Signum.Web.Selenium
             if (this.EntityType == null)
                 return null;
 
-            return Lite.Create(this.EntityType, this.IdOrNull.Value);
+            return Lite.Create(this.EntityType, this.IdOrNull.Value, toString);
         }
     }
 }
