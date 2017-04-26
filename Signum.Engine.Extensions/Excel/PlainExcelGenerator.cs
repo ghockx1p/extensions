@@ -113,7 +113,7 @@ namespace Signum.Engine.Excel
                
                 worksheetPart.Worksheet.Append(new Sequence<Row>()
                 {
-                   new [] { CellBuilder.Cell(title,TemplateCells.Title) }.ToRow(),
+                    title.IsNullOrEmpty() ? null : new [] { CellBuilder.Cell(title,TemplateCells.Title) }.ToRow(),
 
                     (from c in results.Columns
                     select CellBuilder.Cell(c.Column.DisplayName, TemplateCells.Header)).ToRow(),
